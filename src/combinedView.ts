@@ -18,10 +18,11 @@ export function sortCombinedAccountRows(
 }
 
 export function sumEventCostCents(accounts: UsageSnapshot[]): number {
-  return accounts.reduce(
-    (sum, a) => sum + a.events.reduce((s, e) => s + (e.totalCents || 0), 0),
-    0,
-  );
+  return accounts.reduce((sum, a) => {
+    const fromEvents = a.events.reduce((s, e) => s + (e.totalCents || 0), 0);
+    const fromBuckets = (a.dailyBuckets ?? []).reduce((s, b) => s + (b.totalCents || 0), 0);
+    return sum + fromEvents + fromBuckets;
+  }, 0);
 }
 
 export function mergeCombinedEvents(accounts: UsageSnapshot[]): UsageEvent[] {

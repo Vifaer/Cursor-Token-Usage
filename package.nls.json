@@ -16,7 +16,7 @@
   "config.pollingInterval": "Polling interval in seconds (5-300)",
   "config.showStatusBar": "Show usage in status bar",
   "config.statusBarAlignment": "Status bar side: left or right",
-  "config.statusBarDataSource": "Status bar data: overview (all accounts) or current account",
+  "config.statusBarDataSource": "Status bar data: current account (default) or overview (all accounts)",
   "config.statusBarFormat": "Status bar format: percent, amount, amount_with_reset, amount_with_plan",
   "config.displayFormat": "Amount display: remaining, fraction, or compact",
   "config.cautionThreshold": "Warning threshold (used %)",

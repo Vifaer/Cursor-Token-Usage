@@ -16,7 +16,7 @@
   "config.pollingInterval": "刷新间隔（秒，5-300）",
   "config.showStatusBar": "在状态栏显示用量",
   "config.statusBarAlignment": "状态栏位置：left 或 right",
-  "config.statusBarDataSource": "状态栏数据源：overview（全部账号汇总）或 current（当前账号）",
+  "config.statusBarDataSource": "状态栏数据源：current（当前账号，默认）或 overview（全部账号汇总）",
   "config.statusBarFormat": "状态栏格式：percent / amount / amount_with_reset / amount_with_plan",
   "config.displayFormat": "用量显示：remaining / fraction / compact",
   "config.cautionThreshold": "警告阈值（已用 %）",

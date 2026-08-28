@@ -139,7 +139,7 @@ function updateStatusBar(): void {
   }
 
   const config = vscode.workspace.getConfiguration("cursorTokenUsage");
-  const dataSource = config.get<string>("statusBarDataSource", "overview");
+  const dataSource = config.get<string>("statusBarDataSource", "current");
   const combined = tracker.getCombinedView();
   const useOverview = dataSource === "overview" && combined;
 

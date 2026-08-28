@@ -75,6 +75,15 @@ describe("groupModelAggs", () => {
     assert.equal(composer!.variants.length, 2);
   });
 
+  it("merges Default and Auto into one standard variant", () => {
+    const groups = groupModelAggs([agg("Default", 2730000), agg("Auto", 2190000)]);
+    assert.equal(groups.length, 1);
+    assert.equal(groups[0].familyKey, "__auto__");
+    assert.equal(groups[0].totalTokens, 4920000);
+    assert.equal(groups[0].variants.length, 1);
+    assert.equal(modelVariantMode(groups[0].variants[0].model), "standard");
+  });
+
   it("fills filterSlugs from events not intent labels", () => {
     const events = [event("composer-2.5-fast"), event("composer-2.5")];
     const groups = groupModelAggs([agg("Composer 2.5 Fast", 50), agg("Composer 2.5", 20)], events);

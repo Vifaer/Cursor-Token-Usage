@@ -3,6 +3,7 @@ import { sortCombinedAccountRows } from "./combinedView";
 import { computeCacheStats, formatHitRate } from "./cacheStats";
 import { groupModelAggs, modelModeL10nKey, modelVariantMode } from "./modelNormalize";
 import { CombinedViewDto, PanelContext, UsageSnapshot, isCombinedView } from "./models";
+import { buildTrendPoints, computeTrendRange, sumUsageCostCents } from "./trendData";
 import { formatCents, formatEventTime, formatPct, formatRelativeUpdated, formatTokens, isZh, membershipLabel, shortenModel } from "./treeView";
 
 export class UsagePanel {
@@ -91,14 +92,16 @@ function meter(label: string, valueText: string, pct: number, unlimited = false)
   const width = unlimited ? 100 : clampPct(pct);
   const color = unlimited ? "var(--ok)" : barColor(pct);
   const pctLabel = formatPct(pct, unlimited);
+  const valueIsPct = valueText === pctLabel || /%|∞/.test(valueText);
+  const pctRow = valueIsPct ? "" : `<div class="meter-pct" style="color:${color}">${escapeHtml(pctLabel)}</div>`;
   return `<div class="meter">
     <div class="meter-head"><span>${escapeHtml(label)}</span><strong>${escapeHtml(valueText)}</strong></div>
     <div class="track"><div class="fill" style="width:${width}%;background:${color}"></div></div>
-    <div class="meter-pct" style="color:${color}">${escapeHtml(pctLabel)}</div>
+    ${pctRow}
   </div>`;
 }
 
-function ring(pct: number, headline: string, sub: string, unlimited: boolean): string {
+function ring(pct: number, headline: string, sub: string, unlimited: boolean, kicker: string): string {
   const r = 54;
   const c = 2 * Math.PI * r;
   const p = unlimited ? 0 : clampPct(pct);
@@ -115,7 +118,7 @@ function ring(pct: number, headline: string, sub: string, unlimited: boolean): s
       <div class="ring-center" style="color:${color}">${escapeHtml(center)}</div>
     </div>
     <div class="hero-copy">
-      <div class="hero-kicker">${escapeHtml(vscode.l10n.t("Included usage"))}</div>
+      <div class="hero-kicker">${escapeHtml(kicker)}</div>
       <div class="hero-main">${escapeHtml(headline)}</div>
       <div class="hero-sub">${escapeHtml(sub)}</div>
     </div>
@@ -147,55 +150,18 @@ function heroPct(snapshot: UsageSnapshot): number {
   return Math.max(snapshot.cursorModelsPercent ?? 0, snapshot.otherModelsPercent ?? 0);
 }
 
-function eventMs(ts: number): number {
-  return ts > 0 && ts < 1e12 ? ts * 1000 : ts;
-}
-
-function dayKey(ts: number): string {
-  const d = new Date(eventMs(ts));
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, "0");
-  const day = String(d.getDate()).padStart(2, "0");
-  return `${y}-${m}-${day}`;
-}
-
-function isoDay(value: string): string {
-  if (!value) return "";
-  const ms = Date.parse(value);
-  if (!Number.isFinite(ms)) return "";
-  return dayKey(ms);
-}
-
-function trendRange(snapshot: UsageSnapshot, eventDays: string[]): { minDay: string; maxDay: string } {
-  const today = dayKey(Date.now());
-  const cycleStart = isoDay(snapshot.billingCycleStart);
-  const cycleEnd = isoDay(snapshot.billingCycleEnd);
-  const firstEvent = eventDays[0] || today;
-  const lastEvent = eventDays[eventDays.length - 1] || today;
-  const minDay = cycleStart || firstEvent;
-  const maxDay = cycleEnd && cycleEnd < today ? cycleEnd : today;
-  if (minDay <= maxDay) return { minDay, maxDay };
-  return { minDay: firstEvent, maxDay: lastEvent };
-}
-
 function renderTrend(snapshot: UsageSnapshot): string {
-  const points = snapshot.events
-    .filter((e) => e.timestamp)
-    .map((e) => ({
-      day: dayKey(e.timestamp),
-      model: e.model,
-      input: e.inputTokens,
-      output: e.outputTokens,
-      cache: e.cacheWriteTokens + e.cacheReadTokens,
-      tokens: e.totalTokens,
-      cents: e.totalCents,
-    }));
+  const points = buildTrendPoints(snapshot.events, snapshot.dailyBuckets ?? []);
   if (points.length === 0) {
     return `<p class="empty">${escapeHtml(vscode.l10n.t("Not enough event data for a trend"))}</p>`;
   }
   const models = [...new Set(points.map((p) => p.model))].sort();
   const eventDays = [...new Set(points.map((p) => p.day))].sort();
-  const { minDay, maxDay } = trendRange(snapshot, eventDays);
+  const { minDay, maxDay } = computeTrendRange({
+    billingCycleStart: snapshot.billingCycleStart,
+    billingCycleEnd: snapshot.billingCycleEnd,
+    dataDays: eventDays,
+  });
   const payload = JSON.stringify({ points, models, minDay, maxDay }).replace(/</g, "\\u003c");
   const modelOpts = [`<option value="">${escapeHtml(vscode.l10n.t("All models"))}</option>`]
     .concat(models.map((m) => `<option value="${escapeHtml(m)}">${escapeHtml(shortenModel(m))}</option>`))
@@ -537,7 +503,15 @@ function renderHtml(webview: vscode.Webview, ctx: PanelContext, error: string | 
         </div>
         ${renderToolbar(ctx)}
       </header>
-      ${ring(heroPct(snapshot), heroHeadline(snapshot), countdown(snapshot.billingCycleEnd), snapshot.isUnlimited)}
+      ${ring(
+        heroPct(snapshot),
+        heroHeadline(snapshot),
+        countdown(snapshot.billingCycleEnd),
+        snapshot.isUnlimited,
+        snapshot.displayMode === "overall"
+          ? vscode.l10n.t("Included usage")
+          : vscode.l10n.t("Pool usage"),
+      )}
       <section><h2>${escapeHtml(vscode.l10n.t("Token & Cache"))}</h2>
         ${renderStatGrid({
           scope: "account",
@@ -545,12 +519,11 @@ function renderHtml(webview: vscode.Webview, ctx: PanelContext, error: string | 
           cacheHitRate: cache.hitRate,
           cacheRead: cache.cacheReadTokens,
           cacheWrite: cache.cacheWriteTokens,
-          eventCostCents: snapshot.events.reduce((s, e) => s + (e.totalCents || 0), 0),
+          eventCostCents: sumUsageCostCents(snapshot.events, snapshot.dailyBuckets ?? []),
           overallUsedCents: snapshot.overallUsedCents,
           overallLimitCents: snapshot.overallLimitCents,
           onDemandCents: snapshot.onDemandUsedCents,
           eventsComplete: snapshot.eventsComplete,
-          extra: countdownText(snapshot.billingCycleEnd) || undefined,
         })}
       </section>
       <section><h2>${escapeHtml(vscode.l10n.t("Usage Trend"))}</h2>${renderTrend(snapshot)}</section>

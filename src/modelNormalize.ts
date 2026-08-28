@@ -105,6 +105,31 @@ function joinSlugs(slugs: string[]): string {
   return [...new Set(slugs.filter(Boolean))].join("|");
 }
 
+/** Merge aggs that share the same family + variant mode (e.g. Default + Auto → one standard). */
+export function mergeVariantsByMode(variants: ModelAgg[]): ModelAgg[] {
+  const scored = new Map<string, { agg: ModelAgg; bestModel: string; bestTokens: number }>();
+  for (const v of variants) {
+    const mode = modelVariantMode(v.model);
+    const cur = scored.get(mode);
+    if (!cur) {
+      scored.set(mode, { agg: { ...v }, bestModel: v.model, bestTokens: v.totalTokens });
+      continue;
+    }
+    cur.agg.inputTokens += v.inputTokens;
+    cur.agg.outputTokens += v.outputTokens;
+    cur.agg.cacheWriteTokens += v.cacheWriteTokens;
+    cur.agg.cacheReadTokens += v.cacheReadTokens;
+    cur.agg.totalTokens += v.totalTokens;
+    if (v.totalTokens > cur.bestTokens) {
+      cur.bestModel = v.model;
+      cur.bestTokens = v.totalTokens;
+    }
+  }
+  return [...scored.values()]
+    .map(({ agg, bestModel }) => ({ ...agg, model: bestModel }))
+    .sort((a, b) => b.totalTokens - a.totalTokens);
+}
+
 export function groupModelAggs(aggs: ModelAgg[], events: UsageEvent[] = []): GroupedModelAgg[] {
   const map = new Map<string, ModelAgg[]>();
   for (const a of aggs) {
@@ -115,8 +140,8 @@ export function groupModelAggs(aggs: ModelAgg[], events: UsageEvent[] = []): Gro
   }
 
   const groups: GroupedModelAgg[] = [];
-  for (const [familyKey, variants] of map) {
-    variants.sort((a, b) => b.totalTokens - a.totalTokens);
+  for (const [familyKey, rawVariants] of map) {
+    const variants = mergeVariantsByMode(rawVariants);
     let inputTokens = 0;
     let outputTokens = 0;
     let cacheWriteTokens = 0;
@@ -131,7 +156,10 @@ export function groupModelAggs(aggs: ModelAgg[], events: UsageEvent[] = []): Gro
       cacheWriteTokens += v.cacheWriteTokens;
       cacheReadTokens += v.cacheReadTokens;
       totalTokens += v.totalTokens;
-      const slugs = resolveEventSlugs(v.model, events);
+      // Resolve slugs using all raw intents that share this mode
+      const mode = modelVariantMode(v.model);
+      const modeRaw = rawVariants.filter((r) => modelVariantMode(r.model) === mode);
+      const slugs = [...new Set(modeRaw.flatMap((r) => resolveEventSlugs(r.model, events)))];
       variantFilterSlugs[v.model] = joinSlugs(slugs);
       allSlugs.push(...slugs);
     }

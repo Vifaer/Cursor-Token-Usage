@@ -33,10 +33,11 @@ Cursor now bills by tokens in two pools (not the old “fast-premium requests + 
 - UI extension (`extensionKind: ui`): on SSH Remote, WSL, or Dev Containers it still reads the **local** login
 - Shows `$` only when the API returns cents; does not estimate invoices from list prices
 - Trend chart defaults to the last 7 days; From / To can span months within the billing cycle
-- **v1.3:** Details panel defaults to **multi-account overview** with cache hit rate; status bar can show overview summary (`cursorTokenUsage.statusBarDataSource`)
+- **v1.3:** Details panel defaults to **multi-account overview** with cache hit rate; status bar shows current account usage by default (`cursorTokenUsage.statusBarDataSource`, optional `overview`)
 - **v1.3.1:** Scrollable account table (~10 visible rows); unlimited account storage by default; token numbers auto-scale (万/亿, K/M/B)
 - **v1.3.2:** Tooltip sorted by last update + Chinese l10n; foldable By Model groups (Standard/Fast/High); trend filter uses event slugs
 - **v1.3.3:** Status bar drops redundant「用量」prefix; smart cost pill (pool usage first); field-level cache Write hybrid; hide zero Cache Write / On-Demand $0
+- **v1.3.4:** Status bar default = current account; merge Auto/Default duplicate modes; trend uses dailyBuckets + ≥7-day window; meter/hero cleanup
 
 ## Quick Start
 
@@ -258,10 +259,11 @@ Cursor 已改为按 token、双池计费（不再是旧的「fast-premium 请求
 - UI 扩展（`extensionKind: ui`）：SSH Remote、WSL、Dev Containers 下仍读**本机**登录
 - 只在接口返回美分时显示 `$`，不用官网单价估算账单
 - 趋势图默认近 7 天；From / To 可在账单周期内跨月
-- **v1.3：** 详情面板默认 **多账号总览**，展示 Prompt Cache 命中率；状态栏可配置为汇总模式（`cursorTokenUsage.statusBarDataSource`）
+- **v1.3：** 详情面板默认 **多账号总览**，展示 Prompt Cache 命中率；状态栏默认当前账号用量（`cursorTokenUsage.statusBarDataSource`，可选 overview）
 - **v1.3.1：** 账号表固定高度可滚动（约 10 行）；默认不限制保存账号数；Token 数字自动切换单位（万/亿、K/M/B）
 - **v1.3.2：** 状态栏 tooltip 按更新时间排序 + 中文界面；按模型可折叠（标准/快速/高阶）；趋势筛选修复 intent/slug 映射
 - **v1.3.3：** 状态栏去掉多余「用量」前缀；费用格优先套餐用量；缓存写入字段级 hybrid；零值 Cache Write / On-Demand $0 隐藏
+- **v1.3.4：** 状态栏默认当前账号；合并 Auto/Default 重复「标准」；趋势接入 dailyBuckets 且默认近 7 日；meter/hero 去重与文案修正
 
 ### 快速开始
 
