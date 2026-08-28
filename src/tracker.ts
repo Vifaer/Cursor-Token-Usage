@@ -1,6 +1,16 @@
 import * as vscode from "vscode";
 import { fetchUsage } from "./api";
-import { FetchResult, UsageAlert, UsageSnapshot } from "./models";
+import {
+  buildCombinedView,
+  hydrateSnapshot,
+  listAccountSnapshots,
+  loadAccountSnapshot,
+  parseSavedViewScope,
+  saveAccountSnapshot,
+  saveViewScope,
+} from "./accountStore";
+import { mergeEvents } from "./mergeEvents";
+import { CombinedViewDto, UsageAlert, UsageSnapshot, ViewScope } from "./models";
 
 const log = vscode.window.createOutputChannel("Cursor Token Usage - Tracker");
 
@@ -19,6 +29,9 @@ export class UsageTracker {
   private _queuedFull = false;
   private _idleWaiters: Array<() => void> = [];
   private _running: Promise<boolean> | null = null;
+  private _viewScope: ViewScope = "all";
+  private _viewAccountId: string | null = null;
+  private _abortController: AbortController | null = null;
 
   set onUpdate(callback: () => void) {
     this._onUpdate = callback;
@@ -52,6 +65,68 @@ export class UsageTracker {
     return this._lastSuccessTime;
   }
 
+  get viewScope(): ViewScope {
+    return this._viewScope;
+  }
+
+  get viewAccountId(): string | null {
+    return this._viewAccountId;
+  }
+
+  /** Cold-start: show cached account immediately and restore view scope. */
+  hydrateFromStore(): void {
+    const accounts = listAccountSnapshots();
+    if (accounts.length === 0) return;
+    this._lastSnapshot = accounts[0];
+    this._lastSuccessTime = accounts[0].timestamp;
+    const saved = parseSavedViewScope();
+    if (accounts.length > 0) {
+      this._viewScope = saved.scope;
+      this._viewAccountId = saved.scope === "account" ? saved.accountId : null;
+      if (this._viewScope === "account" && this._viewAccountId && !loadAccountSnapshot(this._viewAccountId)) {
+        this._viewScope = "all";
+        this._viewAccountId = null;
+      }
+    }
+    this._onUpdate?.();
+  }
+
+  setViewScope(scope: ViewScope, accountId?: string): void {
+    this._viewScope = scope;
+    this._viewAccountId = scope === "account" ? accountId ?? null : null;
+    void saveViewScope(scope, this._viewAccountId);
+    this._onUpdate?.();
+  }
+
+  getPanelContext(): import("./models").PanelContext {
+    return {
+      data: this.getPanelData(),
+      viewScope: this._viewScope,
+      viewAccountId: this._viewAccountId,
+      currentUserId: this._lastSnapshot?.userId ?? null,
+    };
+  }
+
+  getCombinedView(): CombinedViewDto | null {
+    const accounts = dedupeByUserId(
+      [this._lastSnapshot, ...listOtherAccounts(this._lastSnapshot?.userId)].filter(Boolean) as UsageSnapshot[],
+    );
+    return buildCombinedView(accounts, this._lastSnapshot?.userId);
+  }
+
+  getPanelData(): UsageSnapshot | CombinedViewDto | null {
+    if (this._viewScope === "all") {
+      const accounts = dedupeByUserId(
+        [this._lastSnapshot, ...listOtherAccounts(this._lastSnapshot?.userId)].filter(Boolean) as UsageSnapshot[],
+      );
+      return buildCombinedView(accounts, this._lastSnapshot?.userId);
+    }
+    if (this._viewScope === "account" && this._viewAccountId) {
+      return loadAccountSnapshot(this._viewAccountId);
+    }
+    return this._lastSnapshot;
+  }
+
   private notifyIdle(): void {
     const waiters = this._idleWaiters.splice(0);
     for (const wait of waiters) wait();
@@ -74,10 +149,12 @@ export class UsageTracker {
       }
       if (force) {
         log.appendLine(`[${new Date().toISOString()}] poll waiting for in-flight${fullEvents ? " then full" : ""}`);
+        this._abortController?.abort();
         await this.waitIdle();
         return this.poll(false, { fullEvents: fullEvents || this._queuedFull });
       }
       log.appendLine(`[${new Date().toISOString()}] poll 上次轮询超时，强制重置`);
+      this._abortController?.abort();
       this._pollCount++;
       this._running = null;
       this._polling = false;
@@ -104,19 +181,24 @@ export class UsageTracker {
     const ts = new Date().toISOString();
     this._polling = true;
     this._pollStartTime = Date.now();
+    this._abortController?.abort();
+    this._abortController = new AbortController();
+    const signal = this._abortController.signal;
+    const timeout = setTimeout(() => this._abortController?.abort(), 90000);
+
     try {
-      const result = await Promise.race<FetchResult>([
-        fetchUsage(fullEvents),
-        new Promise((resolve) =>
-          setTimeout(
-            () => resolve({ snapshot: null, error: vscode.l10n.t("Timed out fetching usage"), eventsError: false, aggError: false }),
-            90000,
-          ),
-        ),
-      ]);
+      const result = await fetchUsage(fullEvents, signal);
+      if (signal.aborted || result.error === "aborted") {
+        if (pollId === this._pollCount) {
+          log.appendLine(`[${ts}] poll#${pollId} aborted`);
+        }
+        return false;
+      }
       if (!result.snapshot) {
         this._lastError = result.error;
         this._consecutiveFailures++;
+        this._eventsError = result.eventsError;
+        this._aggError = result.aggError;
         log.appendLine(`[${ts}] poll#${pollId} 失败: ${result.error}`);
         this._onUpdate?.();
         return false;
@@ -135,27 +217,57 @@ export class UsageTracker {
 
       const prev = this._lastSnapshot;
       let snapshot = result.snapshot;
-      if (prev?.eventsComplete && !snapshot.eventsComplete) {
-        const seen = new Set(prev.events.map((e) => `${e.timestamp}|${e.model}|${e.kind}`));
-        const extras = snapshot.events.filter((e) => !seen.has(`${e.timestamp}|${e.model}|${e.kind}`));
-        const events = extras.length > 0 ? [...extras, ...prev.events] : prev.events;
-        snapshot = { ...snapshot, events, eventsComplete: true };
-        log.appendLine(`[${ts}] poll#${pollId} lite 合并 ${extras.length} 条新事件，共 ${events.length} 条`);
+      const accountSwitched = !!prev && prev.userId !== snapshot.userId;
+
+      if (accountSwitched) {
+        log.appendLine(`[${ts}] poll#${pollId} 账号切换 ${prev!.userId.slice(0, 10)} → ${snapshot.userId.slice(0, 10)}`);
+        await saveAccountSnapshot(prev!);
+        const stored = loadAccountSnapshot(snapshot.userId);
+        snapshot = hydrateSnapshot(stored, snapshot);
+        this._lastSnapshot = snapshot;
+        await saveAccountSnapshot(snapshot);
+        this._onUpdate?.();
+        return true;
       }
+
+      if (prev?.userId === snapshot.userId && prev.eventsComplete && !snapshot.eventsComplete) {
+        snapshot = {
+          ...snapshot,
+          events: mergeEvents(prev.events, snapshot.events),
+          eventsComplete: true,
+          dailyBuckets: prev.dailyBuckets,
+        };
+        log.appendLine(`[${ts}] poll#${pollId} lite 合并事件，共 ${snapshot.events.length} 条`);
+      } else {
+        const stored = loadAccountSnapshot(snapshot.userId);
+        snapshot = hydrateSnapshot(stored, snapshot);
+      }
+
       log.appendLine(
-        `[${ts}] poll#${pollId} 成功 full=${snapshot.eventsComplete} events=${snapshot.events.length} C=${snapshot.cursorModelsPercent} O=${snapshot.otherModelsPercent} totalPct=${snapshot.totalPercent} tokens=${snapshot.totalTokens}`,
+        `[${ts}] poll#${pollId} 成功 user=${snapshot.userId.slice(0, 10)} label=${snapshot.accountLabel ?? "-"} full=${snapshot.eventsComplete} events=${snapshot.events.length} tokens=${snapshot.totalTokens}`,
       );
       this._lastSnapshot = snapshot;
-      if (prev && !wasRecovering) this.checkAlerts(prev, snapshot);
+      await saveAccountSnapshot(snapshot);
+
+      if (prev && !wasRecovering && prev.userId === snapshot.userId) this.checkAlerts(prev, snapshot);
+
+      const config = vscode.workspace.getConfiguration("cursorTokenUsage");
+      if (config.get<boolean>("showOverLimitToast", false) && usageOverLimit(snapshot)) {
+        void vscode.window.showWarningMessage(vscode.l10n.t("Cursor usage limit reached or exceeded"));
+      }
+
       this._onUpdate?.();
       return true;
     } catch (err) {
       log.appendLine(`[${ts}] poll#${pollId} 异常: ${err}`);
       return false;
+    } finally {
+      clearTimeout(timeout);
     }
   }
 
   private checkAlerts(prev: UsageSnapshot, curr: UsageSnapshot): void {
+    if (prev.userId !== curr.userId) return;
     const config = vscode.workspace.getConfiguration("cursorTokenUsage");
     if (!config.get("alertEnabled", true)) return;
     const items = config.get<string[]>("alertItems", ["newSession", "cursorModels", "otherModels", "totalTokens"]);
@@ -206,4 +318,31 @@ export class UsageTracker {
     }
     if (alerts.length > 0) this._onAlert?.(alerts);
   }
+}
+
+function listOtherAccounts(currentUserId?: string): UsageSnapshot[] {
+  return listAccountSnapshots().filter((a) => a.userId !== currentUserId);
+}
+
+function dedupeByUserId(accounts: UsageSnapshot[]): UsageSnapshot[] {
+  const map = new Map<string, UsageSnapshot>();
+  for (const a of accounts) {
+    if (!a.userId) continue;
+    const prev = map.get(a.userId);
+    if (!prev || a.timestamp.getTime() >= prev.timestamp.getTime()) {
+      map.set(a.userId, a);
+    }
+  }
+  return [...map.values()];
+}
+
+function usageOverLimit(snapshot: UsageSnapshot): boolean {
+  if (snapshot.requestMax && snapshot.requestUsed !== null && snapshot.requestUsed !== undefined) {
+    return snapshot.requestUsed >= snapshot.requestMax;
+  }
+  if (snapshot.overallUsedCents !== null && snapshot.overallLimitCents && snapshot.overallLimitCents > 0) {
+    return snapshot.overallUsedCents >= snapshot.overallLimitCents;
+  }
+  const pct = Math.max(snapshot.cursorModelsPercent ?? 0, snapshot.otherModelsPercent ?? 0);
+  return pct >= 100;
 }

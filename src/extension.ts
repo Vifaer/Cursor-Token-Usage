@@ -2,16 +2,17 @@
  * Cursor Token Usage — status-bar usage for Cursor token billing.
  * Individual accounts: two pool percentages. Team/Enterprise: included spend vs limit.
  */
+import * as fs from "fs";
+import * as path from "path";
 import * as vscode from "vscode";
-import {
-  deleteSecretToken,
-  initSecretStorage,
-  storeSecretToken,
-} from "./api";
-import { UsageAlert, UsageSnapshot } from "./models";
+import { initStore, listAccountSnapshots } from "./accountStore";
+import { deleteSecretToken, getSecretToken, initSecretStorage, storeSecretToken } from "./api";
+import { runDiagnoseAuth, setExtensionPath } from "./credentials";
+import { CombinedViewDto, UsageAlert, UsageSnapshot, isCombinedView } from "./models";
 import { UsagePanel } from "./panel";
+import { applyStatusBarColors, buildOverviewTooltip, buildTooltipLines, formatOverviewStatusBar, formatStatusBar } from "./render";
 import { UsageTracker } from "./tracker";
-import { formatPct, formatTokens, membershipLabel } from "./treeView";
+import { formatTokens } from "./treeView";
 
 let pollTimer: NodeJS.Timeout | undefined;
 let tracker: UsageTracker;
@@ -20,18 +21,19 @@ let extensionContext: vscode.ExtensionContext;
 let windowFocused = true;
 let suppressStale = false;
 
-const STATUS_ICON = "$(graph)";
-
 export function activate(context: vscode.ExtensionContext): void {
   initSecretStorage(context.secrets);
+  initStore(context);
+  setExtensionPath(context.extensionPath);
   extensionContext = context;
   tracker = new UsageTracker();
+  tracker.hydrateFromStore();
 
   recreateStatusBar();
 
   tracker.onUpdate = () => {
     updateStatusBar();
-    if (!suppressStale && !tracker.lastError) UsagePanel.current?.markStale();
+    if (!suppressStale) UsagePanel.current?.markStale(tracker.lastSuccessTime);
   };
   tracker.onAlert = (alerts) => showAlerts(alerts);
 
@@ -42,6 +44,9 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand("cursor-token-usage.setPollingInterval", setPollingInterval),
     vscode.commands.registerCommand("cursor-token-usage.setStatusBarAlignment", setStatusBarAlignment),
     vscode.commands.registerCommand("cursor-token-usage.configureAlerts", configureAlerts),
+    vscode.commands.registerCommand("cursor-token-usage.diagnoseAuth", diagnoseAuth),
+    vscode.commands.registerCommand("cursor-token-usage.switchAccountView", switchAccountView),
+    vscode.commands.registerCommand("cursor-token-usage.exportUsage", exportUsage),
     vscode.window.onDidChangeWindowState((state) => {
       windowFocused = state.focused;
       startPolling();
@@ -73,7 +78,7 @@ function startPolling(): void {
 
 async function refresh(): Promise<void> {
   suppressStale = true;
-  mainStatusBar.text = `${STATUS_ICON} …`;
+  if (mainStatusBar) mainStatusBar.text = `$(graph) Token …`;
   try {
     await tracker.poll(true, { fullEvents: !!UsagePanel.current });
     UsagePanel.current?.refresh();
@@ -86,28 +91,23 @@ function recreateStatusBar(): void {
   mainStatusBar?.dispose();
   const side = vscode.workspace.getConfiguration("cursorTokenUsage").get<string>("statusBarAlignment", "right");
   const alignment = side === "left" ? vscode.StatusBarAlignment.Left : vscode.StatusBarAlignment.Right;
-  mainStatusBar = vscode.window.createStatusBarItem(alignment, 100);
+  // High priority so the item stays visible (not buried in status-bar overflow "…")
+  mainStatusBar = vscode.window.createStatusBarItem(alignment, 1000);
+  mainStatusBar.name = "Cursor Token Usage";
   mainStatusBar.command = "cursor-token-usage.showDetails";
-  mainStatusBar.text = `${STATUS_ICON} Token …`;
+  mainStatusBar.text = `$(graph) Token`;
   mainStatusBar.tooltip = vscode.l10n.t("Click to view details");
+  mainStatusBar.accessibilityInformation = {
+    label: "Cursor Token Usage",
+    role: "button",
+  };
   mainStatusBar.show();
   extensionContext.subscriptions.push(mainStatusBar);
   updateStatusBar();
 }
 
-function formatCents(cents: number): string {
-  return `$${(cents / 100).toFixed(2)}`;
-}
-
-function usageRatio(snapshot: UsageSnapshot): number | null {
-  if (snapshot.displayMode === "overall" && snapshot.overallUsedCents !== null && snapshot.overallLimitCents && snapshot.overallLimitCents > 0) {
-    return snapshot.overallUsedCents / snapshot.overallLimitCents;
-  }
-  if (snapshot.cursorModelsPercent === null && snapshot.otherModelsPercent === null) return null;
-  return Math.max(snapshot.cursorModelsPercent ?? 0, snapshot.otherModelsPercent ?? 0) / 100;
-}
-
 function updateStatusBar(): void {
+  if (!mainStatusBar) return;
   const showMain = vscode.workspace.getConfiguration("cursorTokenUsage").get("showStatusBar", true);
   if (!showMain) {
     mainStatusBar.hide();
@@ -120,10 +120,10 @@ function updateStatusBar(): void {
     const err = tracker.lastError;
     const needToken = isTokenError(err);
     mainStatusBar.text = needToken
-      ? `$(key) ${vscode.l10n.t("Set Token")}`
+      ? `$(key) Token`
       : err
-        ? `$(warning) ${vscode.l10n.t("Token ?")}`
-        : `${STATUS_ICON} ${vscode.l10n.t("Loading...")}`;
+        ? `$(warning) Token`
+        : `$(graph) Token …`;
     mainStatusBar.backgroundColor = err
       ? new vscode.ThemeColor("statusBarItem.warningBackground")
       : undefined;
@@ -138,61 +138,28 @@ function updateStatusBar(): void {
     return;
   }
 
-  if (snapshot.displayMode === "overall" && snapshot.overallUsedCents !== null && snapshot.overallLimitCents !== null) {
-    mainStatusBar.text = `${STATUS_ICON} ${formatCents(snapshot.overallUsedCents)}/${formatCents(snapshot.overallLimitCents)}`;
-  } else {
-    const c = formatPct(snapshot.cursorModelsPercent, snapshot.isUnlimited);
-    const o = formatPct(snapshot.otherModelsPercent, snapshot.isUnlimited);
-    mainStatusBar.text = `${STATUS_ICON} C ${c} · O ${o}`;
-  }
-  mainStatusBar.tooltip = buildTooltip(snapshot);
-  const ratio = usageRatio(snapshot);
-  if (!snapshot.isUnlimited && ratio !== null && ratio >= 1) {
-    mainStatusBar.backgroundColor = new vscode.ThemeColor("statusBarItem.errorBackground");
-    mainStatusBar.color = new vscode.ThemeColor("statusBarItem.errorForeground");
-  } else if (!snapshot.isUnlimited && ratio !== null && ratio >= 0.8) {
-    mainStatusBar.backgroundColor = new vscode.ThemeColor("statusBarItem.warningBackground");
-    mainStatusBar.color = new vscode.ThemeColor("statusBarItem.warningForeground");
-  } else {
-    mainStatusBar.backgroundColor = undefined;
-    mainStatusBar.color = undefined;
-  }
-}
+  const config = vscode.workspace.getConfiguration("cursorTokenUsage");
+  const dataSource = config.get<string>("statusBarDataSource", "overview");
+  const combined = tracker.getCombinedView();
+  const useOverview = dataSource === "overview" && combined;
 
-function buildTooltip(snapshot: UsageSnapshot): string {
-  const lines = [
-    `Cursor Token Usage · ${membershipLabel(snapshot.membershipType)}`,
-    snapshot.displayMode === "overall" && snapshot.overallUsedCents !== null && snapshot.overallLimitCents !== null
-      ? `${vscode.l10n.t("Included usage")}: ${formatCents(snapshot.overallUsedCents)}/${formatCents(snapshot.overallLimitCents)}`
-      : "",
-    snapshot.cursorModelsPercent !== null ? `Cursor Models: ${formatPct(snapshot.cursorModelsPercent, snapshot.isUnlimited)}` : "",
-    snapshot.otherModelsPercent !== null ? `Other Models: ${formatPct(snapshot.otherModelsPercent, snapshot.isUnlimited)}` : "",
-    countdownLine(snapshot.billingCycleEnd),
-    snapshot.onDemandEnabled && snapshot.onDemandUsedCents !== null
-      ? `On-Demand: ${formatCents(snapshot.onDemandUsedCents)}${
-          snapshot.onDemandLimitCents && snapshot.onDemandLimitCents > 0
-            ? `/${formatCents(snapshot.onDemandLimitCents)}`
-            : ""
-        }`
-      : "",
-    `${vscode.l10n.t("Total Tokens")}: ${formatTokens(snapshot.totalTokens)}`,
-    vscode.l10n.t("Click to view details"),
-  ];
-  return lines.filter((line) => line).join("\n");
-}
+  if (useOverview && combined) {
+    const body = formatOverviewStatusBar(combined);
+    mainStatusBar.text = `$(graph) ${body}`;
+    mainStatusBar.tooltip = buildOverviewTooltip(combined, tracker.lastSuccessTime);
+    applyStatusBarColors(mainStatusBar, tracker.lastSnapshot ?? snapshot, config, combined);
+    return;
+  }
 
-function countdownLine(endIso: string): string {
-  if (!endIso) return "";
-  const msLeft = Math.max(0, Date.parse(endIso) - Date.now());
-  const totalSeconds = Math.ceil(msLeft / 1000);
-  const days = Math.floor(totalSeconds / 86400);
-  const hours = Math.floor((totalSeconds % 86400) / 3600);
-  const minutes = Math.floor((totalSeconds % 3600) / 60);
-  let countdown: string;
-  if (days > 0) countdown = vscode.l10n.t("{0}d {1}h", days, hours);
-  else if (hours > 0) countdown = vscode.l10n.t("{0}h {1}m", hours, minutes);
-  else countdown = vscode.l10n.t("{0}m {1}s", minutes, totalSeconds % 60);
-  return vscode.l10n.t("Reset in: {0}", countdown);
+  // Icon conveys usage entry; body is self-descriptive
+  const body = formatStatusBar(snapshot);
+  mainStatusBar.text = `$(graph) ${body}`;
+  mainStatusBar.tooltip = buildTooltipLines(snapshot, {
+    viewScope: tracker.viewScope,
+    accountCount: listAccountSnapshots().length,
+    lastSuccess: tracker.lastSuccessTime,
+  });
+  applyStatusBarColors(mainStatusBar, snapshot);
 }
 
 function isTokenError(err: string | null): boolean {
@@ -204,18 +171,32 @@ function showDetails(): void {
     void setToken();
     return;
   }
+  const existing = !!UsagePanel.current;
   UsagePanel.show(
     extensionContext,
-    () => tracker.lastSnapshot,
+    () => tracker.getPanelContext(),
     () => tracker.lastError,
-    (command) => {
+    (command, payload) => {
       if (command === "refresh") void refresh();
       if (command === "token") void setToken();
       if (command === "align") void setStatusBarAlignment();
       if (command === "alerts") void configureAlerts();
+      if (command === "switchView") void switchAccountView();
+      if (command === "export") void exportUsage();
+      if (command === "drillAccount" && payload?.userId) {
+        tracker.setViewScope("account", payload.userId);
+        UsagePanel.current?.refresh();
+        updateStatusBar();
+      }
+      if (command === "backOverview") {
+        tracker.setViewScope("all");
+        UsagePanel.current?.refresh();
+        updateStatusBar();
+      }
     },
   );
-  void refresh();
+  const ageMs = tracker.lastSuccessTime ? Date.now() - tracker.lastSuccessTime.getTime() : Infinity;
+  if (!existing || ageMs > 60_000) void refresh();
 }
 
 async function setToken(): Promise<void> {
@@ -331,6 +312,102 @@ async function configureAlerts(): Promise<void> {
     await config.update(`alertThreshold.${pick.id}`, Number(input), vscode.ConfigurationTarget.Global);
     vscode.window.showInformationMessage(vscode.l10n.t("Threshold updated: {0} = {1}", pick.label, input));
   }
+}
+
+async function diagnoseAuth(): Promise<void> {
+  const manual = await getSecretToken();
+  const lines = await runDiagnoseAuth(manual);
+  const ch = vscode.window.createOutputChannel("Cursor Token Usage - Diagnose");
+  ch.clear();
+  ch.appendLine("=== Cursor Token Usage: Diagnose Auth ===");
+  for (const line of lines) ch.appendLine(line);
+  ch.show(true);
+}
+
+async function switchAccountView(): Promise<void> {
+  const current = tracker.lastSnapshot;
+  const accounts = listAccountSnapshots();
+  const picks = [
+    {
+      label: vscode.l10n.t("Overview (all accounts)"),
+      description: `${accounts.length} ${vscode.l10n.t("accounts")}`,
+      id: "all",
+    },
+    {
+      label: vscode.l10n.t("Current account"),
+      description: current?.accountLabel ?? current?.userId?.slice(0, 8) ?? "",
+      id: "current",
+    },
+    ...accounts
+      .filter((a) => a.userId !== current?.userId)
+      .map((a) => ({
+        label: a.accountLabel ?? `${a.userId.slice(0, 8)}…`,
+        description: a.membershipType,
+        id: `account:${a.userId}`,
+      })),
+  ];
+  const pick = await vscode.window.showQuickPick(picks, { placeHolder: vscode.l10n.t("Switch account view") });
+  if (!pick) return;
+  if (pick.id === "current") {
+    tracker.setViewScope("current");
+  } else if (pick.id === "all") {
+    tracker.setViewScope("all");
+  } else if (pick.id.startsWith("account:")) {
+    tracker.setViewScope("account", pick.id.slice("account:".length));
+  }
+  UsagePanel.current?.refresh();
+  updateStatusBar();
+}
+
+async function exportUsage(): Promise<void> {
+  const data = tracker.getPanelData();
+  if (!data) {
+    vscode.window.showWarningMessage(vscode.l10n.t("No usage data to export"));
+    return;
+  }
+  const uri = await vscode.window.showSaveDialog({
+    filters: { JSON: ["json"], CSV: ["csv"] },
+    defaultUri: vscode.Uri.file(path.join(vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? "", "cursor-usage-export.json")),
+  });
+  if (!uri) return;
+  const ext = path.extname(uri.fsPath).toLowerCase();
+  if (ext === ".csv") {
+    fs.writeFileSync(uri.fsPath, buildCsv(data), "utf8");
+  } else {
+    fs.writeFileSync(uri.fsPath, JSON.stringify(data, null, 2), "utf8");
+  }
+  vscode.window.showInformationMessage(vscode.l10n.t("Exported to {0}", uri.fsPath));
+}
+
+function buildCsv(data: UsageSnapshot | CombinedViewDto): string {
+  if (isCombinedView(data)) {
+    const header = "label,userId,membership,totalTokens,cacheHitRate,cacheRead,cacheWrite,input,output,overallUsedCents,overallLimitCents,updatedAt\n";
+    const rows = data.perAccountRows
+      .map((r) =>
+        [
+          csvEscape(r.label),
+          r.userId,
+          r.membershipType,
+          r.totalTokens,
+          r.cacheHitRate !== null ? (r.cacheHitRate * 100).toFixed(1) : "",
+          r.cacheReadTokens,
+          r.cacheWriteTokens,
+          "",
+          "",
+          r.overallUsedCents ?? "",
+          r.overallLimitCents ?? "",
+          r.updatedAt,
+        ].join(","),
+      )
+      .join("\n");
+    return header + rows;
+  }
+  return `label,userId,membership,totalTokens,cursorModelsPercent,otherModelsPercent\n${csvEscape(data.accountLabel ?? "")},${data.userId},${data.membershipType},${data.totalTokens},${data.cursorModelsPercent ?? ""},${data.otherModelsPercent ?? ""}\n`;
+}
+
+function csvEscape(value: string): string {
+  if (value.includes(",") || value.includes('"')) return `"${value.replace(/"/g, '""')}"`;
+  return value;
 }
 
 function showAlerts(alerts: UsageAlert[]): void {

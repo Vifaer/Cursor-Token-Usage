@@ -1,25 +1,18 @@
 import * as https from "https";
 import * as vscode from "vscode";
-import {
-  clearCachedToken,
-  getAccessToken,
-  getUserId,
-} from "./credentials";
-import {
-  FetchResult,
-  ModelAgg,
-  UsageEvent,
-  UsageSnapshot,
-} from "./models";
+import { clearCachedToken, getSession, invalidateSession, readAccountIdentity } from "./credentials";
+import { FetchResult, ModelAgg, UsageEvent, UsageSnapshot, identityToLabel } from "./models";
 
 const outputChannel = vscode.window.createOutputChannel("Cursor Token Usage");
 const SECRET_KEY = "cursorTokenUsage.sessionToken";
 const COOKIE_SAFE_RE = /^[A-Za-z0-9._~%:+-]+$/;
-const ALLOWED_HOSTS = new Set(["cursor.com", "www.cursor.com"]);
+const ALLOWED_HOSTS = new Set(["cursor.com", "www.cursor.com", "api2.cursor.sh"]);
 const PCT_RE = /(\d+(?:\.\d+)?)\s*%/;
+const LEGACY_CACHE_TTL_MS = 5_000;
 
 let secretStorage: vscode.SecretStorage | null = null;
 let autoTokenFailed = false;
+let legacyCache: { token: string; at: number; data: { numRequests: number; maxRequestUsage: number } | null } | null = null;
 
 export function initSecretStorage(storage: vscode.SecretStorage): void {
   secretStorage = storage;
@@ -41,16 +34,21 @@ function log(msg: string): void {
   outputChannel.appendLine(`[${new Date().toLocaleTimeString()}] ${msg}`);
 }
 
-async function getSessionToken(): Promise<{ userId: string; cookieValue: string } | null> {
+async function getSessionToken(): Promise<{ userId: string; cookieValue: string; accessToken: string } | null> {
   if (!autoTokenFailed) {
-    const userId = await getUserId();
-    const accessToken = userId ? await getAccessToken() : null;
-    if (userId && accessToken) {
-      const cookieValue = `${userId}%3A%3A${accessToken}`;
-      if (COOKIE_SAFE_RE.test(cookieValue)) {
-        log(`token 来源: 自动 (${userId.slice(0, 10)}...)`);
-        return { userId, cookieValue };
-      }
+    const session = await getSession();
+    if (session && COOKIE_SAFE_RE.test(session.cookieValue)) {
+      log(`token 来源: 自动 (${session.userId.slice(0, 10)}...)`);
+      return session;
+    }
+  } else {
+    // After 401: try fresh disk session once Cursor re-auths
+    invalidateSession();
+    const session = await getSession();
+    if (session && COOKIE_SAFE_RE.test(session.cookieValue)) {
+      autoTokenFailed = false;
+      log(`token 来源: 自动恢复 (${session.userId.slice(0, 10)}...)`);
+      return session;
     }
   }
   const manualToken = await getSecretToken();
@@ -63,36 +61,69 @@ async function getSessionToken(): Promise<{ userId: string; cookieValue: string 
     const manualUserId = manualToken.split("%3A%3A")[0];
     if (!/^user_[a-zA-Z0-9]{20,}$/.test(manualUserId)) return null;
     log(`token 来源: 手动 (${manualUserId.slice(0, 10)}...)`);
-    return { userId: manualUserId, cookieValue: manualToken };
+    return {
+      userId: manualUserId,
+      cookieValue: manualToken,
+      accessToken: manualToken.split("%3A%3A")[1] ?? "",
+    };
   }
   autoTokenFailed = false;
   log("无法获取 Session Token");
   return null;
 }
 
-export async function fetchUsage(fullEvents = false): Promise<FetchResult> {
+export async function fetchUsage(fullEvents = false, signal?: AbortSignal): Promise<FetchResult> {
+  if (signal?.aborted) {
+    return { snapshot: null, error: "aborted", eventsError: false, aggError: false };
+  }
   const session = await getSessionToken();
   if (!session) {
     return { snapshot: null, error: vscode.l10n.t("Unable to get Session Token"), eventsError: false, aggError: false };
   }
 
-  const summary = await httpGet("https://cursor.com/api/usage-summary", session.cookieValue);
+  let partialData = false;
+  let summary = await httpGet("https://cursor.com/api/usage-summary", session.cookieValue, signal);
   if (!summary) {
-    log("获取 /api/usage-summary 失败");
-    return { snapshot: null, error: vscode.l10n.t("Failed to fetch usage-summary"), eventsError: false, aggError: false };
+    if (signal?.aborted) {
+      return { snapshot: null, error: "aborted", eventsError: false, aggError: false };
+    }
+    log("主路径 usage-summary 失败，尝试 api2 回退");
+    const fallback = await fetchFallbackSummary(session, signal);
+    if (!fallback) {
+      return { snapshot: null, error: vscode.l10n.t("Failed to fetch usage-summary"), eventsError: false, aggError: false };
+    }
+    summary = fallback.summary;
+    partialData = fallback.partialData;
   }
 
   const parsed = parseSummary(summary);
+  const needsLegacy =
+    parsed.requestMax == null ||
+    parsed.requestMax <= 0 ||
+    /enterprise|team/i.test(parsed.membershipType);
+  if (needsLegacy) {
+    const legacy = await fetchLegacyUsage(session.accessToken, signal);
+    if (legacy && legacy.maxRequestUsage > 0) {
+      parsed.requestUsed = legacy.numRequests;
+      parsed.requestMax = legacy.maxRequestUsage;
+      parsed.displayMode = "overall";
+    }
+  }
 
   const startMs = parsed.billingCycleStart
     ? Date.parse(parsed.billingCycleStart)
     : Date.now() - 30 * 24 * 60 * 60 * 1000;
   const endMs = Date.now();
 
-  const [aggResult, eventsResult] = await Promise.all([
-    fetchAggregations(session.cookieValue, startMs, endMs),
-    fetchUsageEvents(session.cookieValue, startMs, endMs, fullEvents ? EVENT_MAX_PAGES : 1),
+  const [aggResult, eventsResult, identity] = await Promise.all([
+    fetchAggregations(session.cookieValue, startMs, endMs, signal),
+    fetchUsageEvents(session.cookieValue, startMs, endMs, fullEvents ? EVENT_MAX_PAGES : 1, signal),
+    readAccountIdentity(),
   ]);
+
+  if (signal?.aborted) {
+    return { snapshot: null, error: "aborted", eventsError: false, aggError: false };
+  }
 
   const aggregations = aggResult.aggs;
   const totalTokens =
@@ -102,16 +133,85 @@ export async function fetchUsage(fullEvents = false): Promise<FetchResult> {
   return {
     snapshot: {
       timestamp: new Date(),
+      userId: session.userId,
+      accountLabel: identityToLabel(identity, session.userId),
       ...parsed,
       aggregations,
       events: eventsResult.events,
       eventsComplete: fullEvents,
       totalTokens,
+      partialData,
     },
     error: null,
     eventsError: eventsResult.error,
     aggError: aggResult.error,
   };
+}
+
+async function fetchFallbackSummary(
+  session: { userId: string; cookieValue: string; accessToken: string },
+  signal?: AbortSignal,
+): Promise<{ summary: Record<string, unknown>; partialData: boolean } | null> {
+  const period = await httpPostApi2(
+    "https://api2.cursor.sh/aiserver.v1.DashboardService/GetCurrentPeriodUsage",
+    {},
+    session.accessToken,
+    signal,
+  );
+  if (period) {
+    const planUsage = (period.planUsage as Record<string, unknown> | undefined) ?? {};
+    const used = parseCents(planUsage.used) ?? parseCents(planUsage.spendCents);
+    const limit = parseCents(planUsage.limit) ?? parseCents(planUsage.limitCents);
+    const totalPct = parsePercent(planUsage.totalPercentUsed);
+    return {
+      partialData: true,
+      summary: {
+        membershipType: typeof period.membershipType === "string" ? period.membershipType : "",
+        billingCycleStart: period.billingCycleStart ?? period.startDate ?? "",
+        billingCycleEnd: period.billingCycleEnd ?? period.endDate ?? "",
+        individualUsage: {
+          overall: { used, limit },
+          plan: {
+            autoPercentUsed: parsePercent(planUsage.autoPercentUsed),
+            apiPercentUsed: parsePercent(planUsage.apiPercentUsed),
+            totalPercentUsed: totalPct,
+          },
+        },
+      },
+    };
+  }
+  const legacy = await fetchLegacyUsage(session.accessToken, signal);
+  if (legacy && legacy.maxRequestUsage > 0) {
+    return {
+      partialData: true,
+      summary: {
+        membershipType: "enterprise",
+        individualUsage: { overall: { used: legacy.numRequests, limit: legacy.maxRequestUsage } },
+      },
+    };
+  }
+  return null;
+}
+
+async function fetchLegacyUsage(
+  accessToken: string,
+  signal?: AbortSignal,
+): Promise<{ numRequests: number; maxRequestUsage: number } | null> {
+  const now = Date.now();
+  if (legacyCache && legacyCache.token === accessToken && now - legacyCache.at < LEGACY_CACHE_TTL_MS) {
+    return legacyCache.data;
+  }
+  const data = await httpGetBearer("https://api2.cursor.sh/auth/usage", accessToken, signal);
+  if (!data) {
+    legacyCache = { token: accessToken, at: now, data: null };
+    return null;
+  }
+  const gpt4 = (data["gpt-4"] as Record<string, unknown> | undefined) ?? data;
+  const numRequests = toInt(gpt4.numRequests ?? data.numRequests);
+  const maxRequestUsage = toInt(gpt4.maxRequestUsage ?? data.maxRequestUsage);
+  const result = maxRequestUsage > 0 ? { numRequests, maxRequestUsage } : null;
+  legacyCache = { token: accessToken, at: now, data: result };
+  return result;
 }
 
 function parsePercent(value: unknown): number | null {
@@ -138,13 +238,9 @@ function parseCents(value: unknown): number | null {
   return null;
 }
 
-/**
- * Account type is inferred from /api/usage-summary, not from the session token.
- * Individual: plan.autoPercentUsed / apiPercentUsed → pool %.
- * Team/Enterprise: individualUsage.overall used/limit (cents) → $ used/$ limit.
- * Never multiply tokens by list prices; only display cents the API returns.
- */
-function parseSummary(data: Record<string, unknown>): Omit<UsageSnapshot, "timestamp" | "aggregations" | "events" | "eventsComplete" | "totalTokens"> {
+function parseSummary(
+  data: Record<string, unknown>,
+): Omit<UsageSnapshot, "timestamp" | "userId" | "accountLabel" | "aggregations" | "events" | "eventsComplete" | "totalTokens"> {
   const individual = (data.individualUsage as Record<string, unknown> | undefined) || {};
   const plan = (individual.plan as Record<string, unknown> | undefined) || {};
   const overall = (individual.overall as Record<string, unknown> | undefined) || {};
@@ -174,7 +270,6 @@ function parseSummary(data: Record<string, unknown>): Omit<UsageSnapshot, "times
   }
 
   const displayMode: UsageSnapshot["displayMode"] = hasPlanPercents || !hasOverall ? "pools" : "overall";
-
   const membershipType = typeof data.membershipType === "string" ? data.membershipType : "";
   const teamLike = /enterprise|team/i.test(membershipType);
   const individualUsed = parseCents(onDemand.used) ?? parseCents(onDemand.usedCents);
@@ -203,6 +298,10 @@ function parseSummary(data: Record<string, unknown>): Omit<UsageSnapshot, "times
     onDemandEnabled,
     onDemandUsedCents,
     onDemandLimitCents,
+    requestUsed: null,
+    requestMax: null,
+    planName: typeof data.planName === "string" ? data.planName : undefined,
+    partialData: false,
   };
 }
 
@@ -210,11 +309,14 @@ async function fetchAggregations(
   cookieValue: string,
   startMs: number,
   endMs: number,
+  signal?: AbortSignal,
 ): Promise<{ aggs: ModelAgg[]; error: boolean }> {
   const data = await httpPost(
     "https://cursor.com/api/dashboard/get-aggregated-usage-events",
     { teamId: -1, startDate: startMs, endDate: endMs },
     cookieValue,
+    true,
+    signal,
   );
   const rows = data?.aggregations;
   if (!Array.isArray(rows)) {
@@ -268,6 +370,7 @@ async function fetchUsageEvents(
   startMs: number,
   endMs: number,
   maxPages = EVENT_MAX_PAGES,
+  signal?: AbortSignal,
 ): Promise<{ events: UsageEvent[]; error: boolean }> {
   const pageSize = EVENT_PAGE_SIZE;
   const events: UsageEvent[] = [];
@@ -276,10 +379,13 @@ async function fetchUsageEvents(
   const pageLimit = Math.max(1, Math.min(EVENT_MAX_PAGES, maxPages));
 
   while (page <= pageLimit) {
+    if (signal?.aborted) return { events, error: false };
     const data = await httpPost(
       "https://cursor.com/api/dashboard/get-filtered-usage-events",
       { startDate: startMs, endDate: endMs, page, pageSize },
       cookieValue,
+      true,
+      signal,
     );
     const rows = data?.usageEventsDisplay;
     if (!Array.isArray(rows)) {
@@ -313,8 +419,17 @@ function toInt(value: unknown): number {
   return 0;
 }
 
-function httpGet(url: string, cookieValue: string, retryOnAuth = true): Promise<Record<string, unknown> | null> {
-  return makeRequest("GET", url, null, cookieValue, retryOnAuth);
+function httpGet(
+  url: string,
+  cookieValue: string,
+  signal?: AbortSignal,
+  retryOnAuth = true,
+): Promise<Record<string, unknown> | null> {
+  return makeRequest("GET", url, null, cookieValue, retryOnAuth, 0, signal);
+}
+
+function httpGetBearer(url: string, bearer: string, signal?: AbortSignal): Promise<Record<string, unknown> | null> {
+  return makeBearerRequest("GET", url, null, bearer, signal);
 }
 
 function httpPost(
@@ -322,8 +437,18 @@ function httpPost(
   body: Record<string, unknown>,
   cookieValue: string,
   retryOnAuth = true,
+  signal?: AbortSignal,
 ): Promise<Record<string, unknown> | null> {
-  return makeRequest("POST", url, body, cookieValue, retryOnAuth);
+  return makeRequest("POST", url, body, cookieValue, retryOnAuth, 0, signal);
+}
+
+function httpPostApi2(
+  url: string,
+  body: Record<string, unknown>,
+  bearer: string,
+  signal?: AbortSignal,
+): Promise<Record<string, unknown> | null> {
+  return makeBearerRequest("POST", url, body, bearer, signal);
 }
 
 function makeRequest(
@@ -333,8 +458,13 @@ function makeRequest(
   cookieValue: string,
   retryOnAuth: boolean,
   serverRetryCount = 0,
+  signal?: AbortSignal,
 ): Promise<Record<string, unknown> | null> {
   return new Promise((resolve) => {
+    if (signal?.aborted) {
+      resolve(null);
+      return;
+    }
     const urlObj = new URL(url);
     if (!ALLOWED_HOSTS.has(urlObj.hostname)) {
       log(`${method} ${url} → 主机不在白名单`);
@@ -347,6 +477,11 @@ function makeRequest(
       settled = true;
       resolve(value);
     };
+    const onAbort = () => {
+      req.destroy();
+      safeResolve(null);
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
     const postData = body ? JSON.stringify(body) : null;
     const options: https.RequestOptions = {
       hostname: urlObj.hostname,
@@ -362,63 +497,9 @@ function makeRequest(
         ...(postData ? { "Content-Length": Buffer.byteLength(postData).toString() } : {}),
       },
     };
-    const req = https.request(options, (res) => {
-      req.setTimeout(30000);
-      if (res.statusCode === 401) {
-        res.resume();
-        log(`${method} ${url} → 401，清除缓存并重试`);
-        clearCachedToken();
-        autoTokenFailed = true;
-        if (retryOnAuth) {
-          retryRequest(method, url, body).then(safeResolve);
-        } else {
-          autoTokenFailed = false;
-          safeResolve(null);
-        }
-        return;
-      }
-      if (res.statusCode && res.statusCode >= 400) {
-        let errData = "";
-        res.on("data", (chunk) => {
-          if (errData.length < 64 * 1024) errData += chunk.toString();
-        });
-        res.on("end", () => {
-          log(`${method} ${url} → HTTP ${res.statusCode}: ${errData.slice(0, 300)}`);
-          if (res.statusCode && res.statusCode >= 500 && serverRetryCount < 2) {
-            const delay = (serverRetryCount + 1) * 3000;
-            setTimeout(() => {
-              makeRequest(method, url, body, cookieValue, retryOnAuth, serverRetryCount + 1).then(safeResolve);
-            }, delay);
-          } else {
-            safeResolve(null);
-          }
-        });
-        return;
-      }
-      if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400) {
-        res.resume();
-        log(`${method} ${url} → 重定向已拒绝`);
-        safeResolve(null);
-        return;
-      }
-      const MAX_BODY = 5 * 1024 * 1024;
-      let data = "";
-      res.on("data", (chunk) => {
-        data += chunk;
-        if (data.length > MAX_BODY) {
-          req.destroy();
-          safeResolve(null);
-        }
-      });
-      res.on("end", () => {
-        try {
-          safeResolve(JSON.parse(data) as Record<string, unknown>);
-        } catch {
-          log(`${method} ${url} → JSON 解析失败`);
-          safeResolve(null);
-        }
-      });
-    });
+    const req = https.request(options, (res) =>
+      handleResponse(res, req, method, url, body, cookieValue, retryOnAuth, serverRetryCount, safeResolve, signal),
+    );
     req.on("error", (err) => {
       log(`${method} ${url} → 网络错误: ${err.message}`);
       safeResolve(null);
@@ -433,12 +514,152 @@ function makeRequest(
   });
 }
 
+function makeBearerRequest(
+  method: string,
+  url: string,
+  body: Record<string, unknown> | null,
+  bearer: string,
+  signal?: AbortSignal,
+): Promise<Record<string, unknown> | null> {
+  return new Promise((resolve) => {
+    if (signal?.aborted) {
+      resolve(null);
+      return;
+    }
+    const urlObj = new URL(url);
+    if (!ALLOWED_HOSTS.has(urlObj.hostname)) {
+      resolve(null);
+      return;
+    }
+    let settled = false;
+    const safeResolve = (value: Record<string, unknown> | null) => {
+      if (settled) return;
+      settled = true;
+      resolve(value);
+    };
+    const postData = body ? JSON.stringify(body) : null;
+    const options: https.RequestOptions = {
+      hostname: urlObj.hostname,
+      path: urlObj.pathname + urlObj.search,
+      method,
+      headers: {
+        Authorization: `Bearer ${bearer}`,
+        Accept: "application/json",
+        "Content-Type": "application/json",
+        "Connect-Protocol-Version": "1",
+        ...(postData ? { "Content-Length": Buffer.byteLength(postData).toString() } : {}),
+      },
+    };
+    const req = https.request(options, (res) => {
+      req.setTimeout(30000);
+      if (res.statusCode && res.statusCode >= 400) {
+        res.resume();
+        safeResolve(null);
+        return;
+      }
+      let data = "";
+      res.on("data", (chunk) => {
+        data += chunk;
+      });
+      res.on("end", () => {
+        try {
+          safeResolve(JSON.parse(data) as Record<string, unknown>);
+        } catch {
+          safeResolve(null);
+        }
+      });
+    });
+    const onAbort = () => {
+      req.destroy();
+      safeResolve(null);
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+    req.on("error", () => safeResolve(null));
+    req.setTimeout(30000, () => {
+      req.destroy();
+      safeResolve(null);
+    });
+    if (postData) req.write(postData);
+    req.end();
+  });
+}
+
+function handleResponse(
+  res: import("http").IncomingMessage,
+  req: import("http").ClientRequest,
+  method: string,
+  url: string,
+  body: Record<string, unknown> | null,
+  cookieValue: string,
+  retryOnAuth: boolean,
+  serverRetryCount: number,
+  safeResolve: (value: Record<string, unknown> | null) => void,
+  signal?: AbortSignal,
+): void {
+  req.setTimeout(30000);
+  if (res.statusCode === 401) {
+    res.resume();
+    log(`${method} ${url} → 401，清除缓存并重试`);
+    invalidateSession();
+    autoTokenFailed = true;
+    if (retryOnAuth && !signal?.aborted) {
+      retryRequest(method, url, body, signal).then(safeResolve);
+    } else {
+      autoTokenFailed = false;
+      safeResolve(null);
+    }
+    return;
+  }
+  if (res.statusCode && res.statusCode >= 400) {
+    let errData = "";
+    res.on("data", (chunk) => {
+      if (errData.length < 64 * 1024) errData += chunk.toString();
+    });
+    res.on("end", () => {
+      log(`${method} ${url} → HTTP ${res.statusCode}: ${errData.slice(0, 300)}`);
+      if (res.statusCode && res.statusCode >= 500 && serverRetryCount < 2 && !signal?.aborted) {
+        const delay = (serverRetryCount + 1) * 3000;
+        setTimeout(() => {
+          makeRequest(method, url, body, cookieValue, retryOnAuth, serverRetryCount + 1, signal).then(safeResolve);
+        }, delay);
+      } else {
+        safeResolve(null);
+      }
+    });
+    return;
+  }
+  if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400) {
+    res.resume();
+    log(`${method} ${url} → 重定向已拒绝`);
+    safeResolve(null);
+    return;
+  }
+  const MAX_BODY = 5 * 1024 * 1024;
+  let data = "";
+  res.on("data", (chunk) => {
+    data += chunk;
+    if (data.length > MAX_BODY) {
+      req.destroy();
+      safeResolve(null);
+    }
+  });
+  res.on("end", () => {
+    try {
+      safeResolve(JSON.parse(data) as Record<string, unknown>);
+    } catch {
+      log(`${method} ${url} → JSON 解析失败`);
+      safeResolve(null);
+    }
+  });
+}
+
 async function retryRequest(
   method: string,
   url: string,
   body: Record<string, unknown> | null,
+  signal?: AbortSignal,
 ): Promise<Record<string, unknown> | null> {
   const session = await getSessionToken();
   if (!session) return null;
-  return makeRequest(method, url, body, session.cookieValue, false);
+  return makeRequest(method, url, body, session.cookieValue, false, 0, signal);
 }

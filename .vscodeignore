@@ -3,7 +3,17 @@ src/**
 tsconfig.json
 **/*.map
 .gitignore
-node_modules/**
 *.vsix
 .DS_Store
 out/**/*.map
+out/tests/**
+
+# Ship only the sql.js entry + wasm (require('sql.js') needs package.json)
+node_modules/**
+!node_modules/sql.js/
+node_modules/sql.js/**
+!node_modules/sql.js/package.json
+!node_modules/sql.js/dist/
+node_modules/sql.js/dist/**
+!node_modules/sql.js/dist/sql-wasm.js
+!node_modules/sql.js/dist/sql-wasm.wasm

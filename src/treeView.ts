@@ -224,11 +224,22 @@ export function formatCents(cents: number): string {
   return `$${(cents / 100).toFixed(2)}`;
 }
 
+import { formatCompactNumber } from "./formatNumber";
+
 export function formatTokens(tokens: number): string {
-  if (isZh() && tokens >= 10000) return `${(tokens / 10000).toFixed(1)}万`;
-  if (tokens >= 1_000_000) return `${(tokens / 1_000_000).toFixed(1)}M`;
-  if (tokens >= 1000) return `${(tokens / 1000).toFixed(1)}K`;
-  return `${tokens}`;
+  return formatCompactNumber(tokens, isZh());
+}
+
+export function formatRelativeUpdated(iso: string): string {
+  const ms = Date.now() - Date.parse(iso);
+  if (!Number.isFinite(ms) || ms < 0) return "—";
+  const sec = Math.floor(ms / 1000);
+  if (sec < 60) return vscode.l10n.t("{0}s ago", sec);
+  const min = Math.floor(sec / 60);
+  if (min < 60) return vscode.l10n.t("{0}m ago", min);
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return vscode.l10n.t("{0}h ago", hr);
+  return vscode.l10n.t("{0}d ago", Math.floor(hr / 24));
 }
 
 export function formatEventTime(ts: number): string {

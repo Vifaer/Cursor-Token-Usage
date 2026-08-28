@@ -33,6 +33,9 @@ Cursor now bills by tokens in two pools (not the old “fast-premium requests + 
 - UI extension (`extensionKind: ui`): on SSH Remote, WSL, or Dev Containers it still reads the **local** login
 - Shows `$` only when the API returns cents; does not estimate invoices from list prices
 - Trend chart defaults to the last 7 days; From / To can span months within the billing cycle
+- **v1.3:** Details panel defaults to **multi-account overview** with cache hit rate; status bar can show overview summary (`cursorTokenUsage.statusBarDataSource`)
+- **v1.3.1:** Scrollable account table (~10 visible rows); unlimited account storage by default; token numbers auto-scale (万/亿, K/M/B)
+- **v1.3.2:** Tooltip sorted by last update + Chinese l10n; foldable By Model groups (Standard/Fast/High); trend filter uses event slugs
 
 ## Quick Start
 
@@ -123,6 +126,7 @@ Trend chart: Token (stacked input / output / cache + line) or Cost (bars + line)
 | `cursorTokenUsage.alertThreshold.otherModels` | 10 | Other Models pool change (%) |
 | `cursorTokenUsage.alertThreshold.onDemandSpending` | 1 | On-demand spend change ($) |
 | `cursorTokenUsage.alertThreshold.totalTokens` | 100000 | Total tokens change |
+| `cursorTokenUsage.maxStoredAccounts` | 0 | Max stored accounts (0 = unlimited; N>0 prunes oldest) |
 
 ## Commands
 
@@ -253,6 +257,9 @@ Cursor 已改为按 token、双池计费（不再是旧的「fast-premium 请求
 - UI 扩展（`extensionKind: ui`）：SSH Remote、WSL、Dev Containers 下仍读**本机**登录
 - 只在接口返回美分时显示 `$`，不用官网单价估算账单
 - 趋势图默认近 7 天；From / To 可在账单周期内跨月
+- **v1.3：** 详情面板默认 **多账号总览**，展示 Prompt Cache 命中率；状态栏可配置为汇总模式（`cursorTokenUsage.statusBarDataSource`）
+- **v1.3.1：** 账号表固定高度可滚动（约 10 行）；默认不限制保存账号数；Token 数字自动切换单位（万/亿、K/M/B）
+- **v1.3.2：** 状态栏 tooltip 按更新时间排序 + 中文界面；按模型可折叠（标准/快速/高阶）；趋势筛选修复 intent/slug 映射
 
 ### 快速开始
 
@@ -343,6 +350,7 @@ cursor --install-extension akitogo.cursor-token-usage
 | `cursorTokenUsage.alertThreshold.otherModels` | 10 | Other Models 池变化（%） |
 | `cursorTokenUsage.alertThreshold.onDemandSpending` | 1 | On-Demand 花费变化（$） |
 | `cursorTokenUsage.alertThreshold.totalTokens` | 100000 | Token 总量变化 |
+| `cursorTokenUsage.maxStoredAccounts` | 0 | 最多保存账号数（0=不限制） |
 
 ### 命令
 

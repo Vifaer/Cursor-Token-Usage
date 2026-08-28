@@ -2,7 +2,7 @@
   "name": "cursor-token-usage",
   "displayName": "%displayName%",
   "description": "%description%",
-  "version": "1.0.10",
+  "version": "1.3.3",
   "publisher": "akitogo",
   "license": "MIT",
   "icon": "icon.png",
@@ -30,7 +30,10 @@
       { "command": "cursor-token-usage.setToken", "title": "%cmd.setToken%" },
       { "command": "cursor-token-usage.setPollingInterval", "title": "%cmd.setPollingInterval%" },
       { "command": "cursor-token-usage.setStatusBarAlignment", "title": "%cmd.setStatusBarAlignment%" },
-      { "command": "cursor-token-usage.configureAlerts", "title": "%cmd.configureAlerts%" }
+      { "command": "cursor-token-usage.configureAlerts", "title": "%cmd.configureAlerts%" },
+      { "command": "cursor-token-usage.diagnoseAuth", "title": "%cmd.diagnoseAuth%" },
+      { "command": "cursor-token-usage.switchAccountView", "title": "%cmd.switchAccountView%" },
+      { "command": "cursor-token-usage.exportUsage", "title": "%cmd.exportUsage%" }
     ],
     "configuration": {
       "title": "%config.title%",
@@ -59,6 +62,53 @@
           "enum": ["left", "right"],
           "default": "right",
           "description": "%config.statusBarAlignment%"
+        },
+        "cursorTokenUsage.statusBarDataSource": {
+          "type": "string",
+          "enum": ["overview", "current"],
+          "default": "overview",
+          "description": "%config.statusBarDataSource%"
+        },
+        "cursorTokenUsage.statusBarFormat": {
+          "type": "string",
+          "enum": ["percent", "amount", "amount_with_reset", "amount_with_plan"],
+          "default": "amount",
+          "description": "%config.statusBarFormat%"
+        },
+        "cursorTokenUsage.displayFormat": {
+          "type": "string",
+          "enum": ["remaining", "fraction", "compact"],
+          "default": "fraction",
+          "description": "%config.displayFormat%"
+        },
+        "cursorTokenUsage.cautionThreshold": {
+          "type": "number",
+          "default": 80,
+          "minimum": 0,
+          "maximum": 100,
+          "description": "%config.cautionThreshold%"
+        },
+        "cursorTokenUsage.criticalThreshold": {
+          "type": "number",
+          "default": 100,
+          "minimum": 0,
+          "maximum": 200,
+          "description": "%config.criticalThreshold%"
+        },
+        "cursorTokenUsage.showTrafficLight": {
+          "type": "boolean",
+          "default": false,
+          "description": "%config.showTrafficLight%"
+        },
+        "cursorTokenUsage.stateDbPath": {
+          "type": "string",
+          "default": "",
+          "description": "%config.stateDbPath%"
+        },
+        "cursorTokenUsage.showOverLimitToast": {
+          "type": "boolean",
+          "default": false,
+          "description": "%config.showOverLimitToast%"
         },
         "cursorTokenUsage.alertEnabled": {
           "type": "boolean",
@@ -109,13 +159,24 @@
           "default": 100000,
           "minimum": 0,
           "description": "%config.alertThreshold.totalTokens%"
+        },
+        "cursorTokenUsage.maxStoredAccounts": {
+          "type": "number",
+          "default": 0,
+          "minimum": 0,
+          "description": "%config.maxStoredAccounts%"
         }
       }
     }
   },
   "scripts": {
+    "vscode:prepublish": "npm run compile",
     "compile": "tsc -p ./",
-    "watch": "tsc -watch -p ./"
+    "watch": "tsc -watch -p ./",
+    "test": "npm run compile && node --test out/tests/*.test.js"
+  },
+  "dependencies": {
+    "sql.js": "^1.14.2"
   },
   "devDependencies": {
     "@types/node": "^20.10.0",
