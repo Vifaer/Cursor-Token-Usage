@@ -93,7 +93,7 @@ export function formatOverviewStatusBar(combined: CombinedViewDto): string {
   return vscode.l10n.t("{0} accounts · {1} · cache {2}", n, tok, hit);
 }
 
-export function buildOverviewTooltip(combined: CombinedViewDto, lastSuccess?: Date | null): string {
+export function buildOverviewTooltip(combined: CombinedViewDto, lastSuccess?: Date | null): vscode.MarkdownString {
   const lines: string[] = [
     vscode.l10n.t("Cursor Token Usage · Overview"),
     `${vscode.l10n.t("Total Tokens")}: ${formatTokens(combined.totalTokens)}`,
@@ -113,7 +113,30 @@ export function buildOverviewTooltip(combined: CombinedViewDto, lastSuccess?: Da
     lines.push(vscode.l10n.t("Updated {0}s ago", sec));
   }
   lines.push(vscode.l10n.t("Click to view details"));
-  return lines.join("\n");
+  return wrapStatusBarTooltip(lines.filter(Boolean).join("\n"));
+}
+
+function wrapStatusBarTooltip(body: string): vscode.MarkdownString {
+  const mode =
+    vscode.workspace.getConfiguration("cursorTokenUsage").get<string>("statusBarDataSource", "current") === "overview"
+      ? "overview"
+      : "current";
+  const md = new vscode.MarkdownString(undefined, true);
+  md.supportThemeIcons = true;
+  md.isTrusted = { enabledCommands: ["cursor-token-usage.toggleStatusBarDataSource"] };
+  md.appendText(body);
+  const modeLabel =
+    mode === "overview"
+      ? vscode.l10n.t("Status bar: Overview")
+      : vscode.l10n.t("Status bar: Current account");
+  const action =
+    mode === "overview"
+      ? vscode.l10n.t("Switch to current account")
+      : vscode.l10n.t("Switch to overview");
+  md.appendMarkdown(
+    `\n\n---\n\n$(swap) ${modeLabel} · [${action}](command:cursor-token-usage.toggleStatusBarDataSource)`,
+  );
+  return md;
 }
 function maxOverviewUsagePercent(combined: CombinedViewDto): number {
   let max = 0;
@@ -135,7 +158,7 @@ function asciiBar(pct: number, width = 24): string {
 export function buildTooltipLines(
   snapshot: UsageSnapshot,
   opts?: { viewScope?: string; accountCount?: number; lastSuccess?: Date | null },
-): string {
+): vscode.MarkdownString {
   const lines: string[] = [
     `Cursor Token Usage · ${membershipLabel(snapshot.membershipType)}`,
     snapshot.accountLabel ? `${vscode.l10n.t("Account")}: ${snapshot.accountLabel}` : "",
@@ -189,7 +212,7 @@ export function buildTooltipLines(
     lines.push(vscode.l10n.t("Updated {0}s ago", sec));
   }
   lines.push(vscode.l10n.t("Click to view details"));
-  return lines.filter(Boolean).join("\n");
+  return wrapStatusBarTooltip(lines.filter(Boolean).join("\n"));
 }
 
 export function usageRatio(snapshot: UsageSnapshot): number | null {

@@ -10,6 +10,7 @@
   "cmd.configureAlerts": "Configure Usage Alerts",
   "cmd.diagnoseAuth": "Diagnose Auth",
   "cmd.switchAccountView": "Switch Account View",
+  "cmd.toggleStatusBarDataSource": "Toggle Status Bar: Current / Overview",
   "cmd.exportUsage": "Export Usage",
   "config.title": "Cursor Token Usage",
   "config.displayCount": "Recent usage rows in details panel",

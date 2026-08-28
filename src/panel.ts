@@ -221,6 +221,12 @@ function viewScopeLabel(ctx: PanelContext): string {
 
 function renderToolbar(ctx: PanelContext): string {
   const scopeLabel = escapeHtml(viewScopeLabel(ctx));
+  const barSrc = vscode.workspace.getConfiguration("cursorTokenUsage").get<string>("statusBarDataSource", "current");
+  const barLabel =
+    barSrc === "overview"
+      ? vscode.l10n.t("Status bar: Overview")
+      : vscode.l10n.t("Status bar: Current account");
+  const barTitle = vscode.l10n.t("Toggle status bar between current account and overview");
   const backBtn =
     ctx.viewScope === "account"
       ? `<button type="button" class="btn-secondary" data-cmd="backOverview">${escapeHtml(vscode.l10n.t("Back to overview"))}</button>`
@@ -230,12 +236,14 @@ function renderToolbar(ctx: PanelContext): string {
     <button type="button" class="btn-primary" data-cmd="refresh">${escapeHtml(vscode.l10n.t("Refresh"))}</button>
     <span class="toolbar-divider" aria-hidden="true"></span>
     <button type="button" class="btn-secondary" data-cmd="switchView" title="${escapeHtml(vscode.l10n.t("Switch account view"))}">${scopeLabel}</button>
+    <button type="button" class="btn-secondary" data-cmd="toggleStatusBar" title="${escapeHtml(barTitle)}">${escapeHtml(barLabel)}</button>
     <button type="button" class="btn-secondary" data-cmd="export">${escapeHtml(vscode.l10n.t("Export"))}</button>
     <div class="menu-wrap">
       <button type="button" class="btn-icon btn-secondary" id="menu-toggle" aria-haspopup="menu" aria-expanded="false" title="${escapeHtml(vscode.l10n.t("More actions"))}">⋯</button>
       <div class="menu-panel" id="menu-panel" role="menu" hidden>
         <button type="button" role="menuitem" data-cmd="token">${escapeHtml(vscode.l10n.t("Set Session Token"))}</button>
         <button type="button" role="menuitem" data-cmd="align">${escapeHtml(vscode.l10n.t("Status bar side"))}</button>
+        <button type="button" role="menuitem" data-cmd="toggleStatusBar">${escapeHtml(barLabel)}</button>
         <button type="button" role="menuitem" data-cmd="alerts">${escapeHtml(vscode.l10n.t("Configure Usage Alerts"))}</button>
       </div>
     </div>

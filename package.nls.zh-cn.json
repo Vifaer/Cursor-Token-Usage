@@ -10,6 +10,7 @@
   "cmd.configureAlerts": "配置用量提醒",
   "cmd.diagnoseAuth": "诊断鉴权",
   "cmd.switchAccountView": "切换账号视图",
+  "cmd.toggleStatusBarDataSource": "切换状态栏：当前账号 / 全部合计",
   "cmd.exportUsage": "导出用量",
   "config.title": "Cursor Token Usage",
   "config.displayCount": "详情面板最近用量列表显示条数",

@@ -2,7 +2,7 @@
   "name": "cursor-token-usage",
   "displayName": "%displayName%",
   "description": "%description%",
-  "version": "1.3.4",
+  "version": "1.3.5",
   "publisher": "akitogo",
   "license": "MIT",
   "icon": "icon.png",
@@ -33,6 +33,7 @@
       { "command": "cursor-token-usage.configureAlerts", "title": "%cmd.configureAlerts%" },
       { "command": "cursor-token-usage.diagnoseAuth", "title": "%cmd.diagnoseAuth%" },
       { "command": "cursor-token-usage.switchAccountView", "title": "%cmd.switchAccountView%" },
+      { "command": "cursor-token-usage.toggleStatusBarDataSource", "title": "%cmd.toggleStatusBarDataSource%" },
       { "command": "cursor-token-usage.exportUsage", "title": "%cmd.exportUsage%" }
     ],
     "configuration": {

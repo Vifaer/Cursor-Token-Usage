@@ -46,6 +46,7 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand("cursor-token-usage.configureAlerts", configureAlerts),
     vscode.commands.registerCommand("cursor-token-usage.diagnoseAuth", diagnoseAuth),
     vscode.commands.registerCommand("cursor-token-usage.switchAccountView", switchAccountView),
+    vscode.commands.registerCommand("cursor-token-usage.toggleStatusBarDataSource", toggleStatusBarDataSource),
     vscode.commands.registerCommand("cursor-token-usage.exportUsage", exportUsage),
     vscode.window.onDidChangeWindowState((state) => {
       windowFocused = state.focused;
@@ -55,7 +56,12 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.workspace.onDidChangeConfiguration((e) => {
       if (e.affectsConfiguration("cursorTokenUsage.pollingInterval")) startPolling();
       if (e.affectsConfiguration("cursorTokenUsage.statusBarAlignment")) recreateStatusBar();
-      else if (e.affectsConfiguration("cursorTokenUsage")) updateStatusBar();
+      else if (e.affectsConfiguration("cursorTokenUsage")) {
+        updateStatusBar();
+        if (e.affectsConfiguration("cursorTokenUsage.statusBarDataSource")) {
+          UsagePanel.current?.refresh();
+        }
+      }
     }),
   );
 
@@ -182,6 +188,7 @@ function showDetails(): void {
       if (command === "align") void setStatusBarAlignment();
       if (command === "alerts") void configureAlerts();
       if (command === "switchView") void switchAccountView();
+      if (command === "toggleStatusBar") void toggleStatusBarDataSource();
       if (command === "export") void exportUsage();
       if (command === "drillAccount" && payload?.userId) {
         tracker.setViewScope("account", payload.userId);
@@ -322,6 +329,21 @@ async function diagnoseAuth(): Promise<void> {
   ch.appendLine("=== Cursor Token Usage: Diagnose Auth ===");
   for (const line of lines) ch.appendLine(line);
   ch.show(true);
+}
+
+async function toggleStatusBarDataSource(): Promise<void> {
+  const config = vscode.workspace.getConfiguration("cursorTokenUsage");
+  const cur = config.get<string>("statusBarDataSource", "current");
+  const next = cur === "overview" ? "current" : "overview";
+  await config.update("statusBarDataSource", next, vscode.ConfigurationTarget.Global);
+  updateStatusBar();
+  UsagePanel.current?.refresh();
+  vscode.window.setStatusBarMessage(
+    next === "overview"
+      ? vscode.l10n.t("Status bar: showing overview")
+      : vscode.l10n.t("Status bar: showing current account"),
+    2500,
+  );
 }
 
 async function switchAccountView(): Promise<void> {
