@@ -6,9 +6,9 @@
 
 **A Cursor IDE extension that shows live Cursor token billing on the status bar**
 
-[![Release](https://img.shields.io/github/v/release/Akito-Go/Cursor-Token-Usage)](https://github.com/Akito-Go/Cursor-Token-Usage/releases)
+[![Release](https://img.shields.io/github/v/release/Vifaer/Cursor-Token-Usage)](https://github.com/Vifaer/Cursor-Token-Usage/releases)
 [![Open VSX](https://img.shields.io/open-vsx/v/akitogo/cursor-token-usage)](https://open-vsx.org/extension/akitogo/cursor-token-usage)
-[![License](https://img.shields.io/github/license/Akito-Go/Cursor-Token-Usage)](LICENSE)
+[![License](https://img.shields.io/github/license/Vifaer/Cursor-Token-Usage)](LICENSE)
 
 [English](#cursor-token-usage) · [中文](#中文) · [Quick Start](#quick-start) · [Features](#features) · [Authentication](#authentication) · [UI](#ui) · [FAQ](#faq)
 
@@ -36,6 +36,7 @@ Cursor now bills by tokens in two pools (not the old “fast-premium requests + 
 - **v1.3:** Details panel defaults to **multi-account overview** with cache hit rate; status bar can show overview summary (`cursorTokenUsage.statusBarDataSource`)
 - **v1.3.1:** Scrollable account table (~10 visible rows); unlimited account storage by default; token numbers auto-scale (万/亿, K/M/B)
 - **v1.3.2:** Tooltip sorted by last update + Chinese l10n; foldable By Model groups (Standard/Fast/High); trend filter uses event slugs
+- **v1.3.3:** Status bar drops redundant「用量」prefix; smart cost pill (pool usage first); field-level cache Write hybrid; hide zero Cache Write / On-Demand $0
 
 ## Quick Start
 
@@ -49,7 +50,7 @@ cursor --install-extension akitogo.cursor-token-usage
 
 ### From a VSIX
 
-1. Download `cursor-token-usage-1.0.10.vsix` from [Releases](https://github.com/Akito-Go/Cursor-Token-Usage/releases/tag/v1.0.10)
+1. Download `cursor-token-usage-1.3.3.vsix` from [Releases](https://github.com/Vifaer/Cursor-Token-Usage/releases)
 2. Drag it into Cursor, or `Cmd+Shift+P` (Windows: `Ctrl+Shift+P`) → `Extensions: Install from VSIX...`
 3. Run `Developer: Reload Window`
 
@@ -260,6 +261,7 @@ Cursor 已改为按 token、双池计费（不再是旧的「fast-premium 请求
 - **v1.3：** 详情面板默认 **多账号总览**，展示 Prompt Cache 命中率；状态栏可配置为汇总模式（`cursorTokenUsage.statusBarDataSource`）
 - **v1.3.1：** 账号表固定高度可滚动（约 10 行）；默认不限制保存账号数；Token 数字自动切换单位（万/亿、K/M/B）
 - **v1.3.2：** 状态栏 tooltip 按更新时间排序 + 中文界面；按模型可折叠（标准/快速/高阶）；趋势筛选修复 intent/slug 映射
+- **v1.3.3：** 状态栏去掉多余「用量」前缀；费用格优先套餐用量；缓存写入字段级 hybrid；零值 Cache Write / On-Demand $0 隐藏
 
 ### 快速开始
 
@@ -273,7 +275,7 @@ cursor --install-extension akitogo.cursor-token-usage
 
 #### 从 VSIX 安装
 
-1. 从 [Releases](https://github.com/Akito-Go/Cursor-Token-Usage/releases/tag/v1.0.10) 下载 `cursor-token-usage-1.0.10.vsix`
+1. 从 [Releases](https://github.com/Vifaer/Cursor-Token-Usage/releases) 下载 `cursor-token-usage-1.3.3.vsix`
 2. 拖进 Cursor，或 `Cmd+Shift+P`（Windows：`Ctrl+Shift+P`）→ `Extensions: Install from VSIX...`
 3. 执行 `Developer: Reload Window`
 
@@ -454,4 +456,4 @@ npx @vscode/vsce package --no-dependencies
 
 ---
 
-Created by [Akito-Go](https://github.com/Akito-Go) — star the repo if this helps.
+Maintained by [Vifaer](https://github.com/Vifaer) · based on [Akito-Go/Cursor-Token-Usage](https://github.com/Akito-Go/Cursor-Token-Usage). Star the repo if this helps.

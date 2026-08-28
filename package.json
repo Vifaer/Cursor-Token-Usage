@@ -8,12 +8,12 @@
   "icon": "icon.png",
   "repository": {
     "type": "git",
-    "url": "https://github.com/Akito-Go/Cursor-Token-Usage.git"
+    "url": "https://github.com/Vifaer/Cursor-Token-Usage.git"
   },
   "bugs": {
-    "url": "https://github.com/Akito-Go/Cursor-Token-Usage/issues"
+    "url": "https://github.com/Vifaer/Cursor-Token-Usage/issues"
   },
-  "homepage": "https://github.com/Akito-Go/Cursor-Token-Usage#readme",
+  "homepage": "https://github.com/Vifaer/Cursor-Token-Usage#readme",
   "keywords": ["cursor", "token", "usage", "billing"],
   "engines": {
     "vscode": "^1.85.0"
