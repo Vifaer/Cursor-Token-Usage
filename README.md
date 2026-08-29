@@ -52,7 +52,7 @@ cursor --install-extension vifaer.cursor-token-usage
 
 ### 从 VSIX 安装
 
-1. 从 [Releases](https://github.com/Vifaer/Cursor-Token-Usage/releases) 下载 `cursor-token-usage-1.3.5.vsix`
+1. 从 [Releases](https://github.com/Vifaer/Cursor-Token-Usage/releases) 下载 `cursor-token-usage-1.3.7.vsix`
 2. 拖进 Cursor，或 `Cmd+Shift+P`（Windows：`Ctrl+Shift+P`）→ `Extensions: Install from VSIX...`
 3. 执行 `Developer: Reload Window`
 
@@ -279,7 +279,7 @@ cursor --install-extension vifaer.cursor-token-usage
 
 #### From a VSIX
 
-1. Download `cursor-token-usage-1.3.5.vsix` from [Releases](https://github.com/Vifaer/Cursor-Token-Usage/releases)
+1. Download `cursor-token-usage-1.3.7.vsix` from [Releases](https://github.com/Vifaer/Cursor-Token-Usage/releases)
 2. Drag it into Cursor, or `Cmd+Shift+P` (Windows: `Ctrl+Shift+P`) → `Extensions: Install from VSIX...`
 3. Run `Developer: Reload Window`
 

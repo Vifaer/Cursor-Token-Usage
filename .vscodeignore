@@ -5,6 +5,8 @@ tsconfig.json
 .gitignore
 *.vsix
 .DS_Store
+.env
+scripts/**
 out/**/*.map
 out/tests/**
 
