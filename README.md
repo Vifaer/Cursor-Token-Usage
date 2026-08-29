@@ -7,7 +7,7 @@
 **在状态栏显示 Cursor 现行 token 计费用量的 Cursor IDE 扩展**
 
 [![Release](https://img.shields.io/github/v/release/Vifaer/Cursor-Token-Usage)](https://github.com/Vifaer/Cursor-Token-Usage/releases)
-[![Open VSX](https://img.shields.io/open-vsx/v/akitogo/cursor-token-usage)](https://open-vsx.org/extension/akitogo/cursor-token-usage)
+[![Open VSX](https://img.shields.io/open-vsx/v/vifaer/cursor-token-usage)](https://open-vsx.org/extension/vifaer/cursor-token-usage)
 [![License](https://img.shields.io/github/license/Vifaer/Cursor-Token-Usage)](LICENSE)
 
 [中文](#cursor-token-usage) · [English](#english) · [快速开始](#快速开始) · [核心特性](#核心特性) · [认证](#认证) · [界面](#操作界面) · [常见问题](#常见问题)
@@ -44,10 +44,10 @@ Cursor 已改为按 token、双池计费（不再是旧的「fast-premium 请求
 
 ### 从 Open VSX 安装
 
-从 [Open VSX](https://open-vsx.org/extension/akitogo/cursor-token-usage)（Cursor 扩展市场）安装。搜 `Cursor Token Usage`，或：
+从 [Open VSX](https://open-vsx.org/extension/vifaer/cursor-token-usage)（Cursor 扩展市场）安装。搜 `Cursor Token Usage`，或：
 
 ```bash
-cursor --install-extension akitogo.cursor-token-usage
+cursor --install-extension vifaer.cursor-token-usage
 ```
 
 ### 从 VSIX 安装
@@ -271,10 +271,10 @@ Cursor now bills by tokens in two pools (not the old “fast-premium requests + 
 
 #### From Open VSX
 
-Install from [Open VSX](https://open-vsx.org/extension/akitogo/cursor-token-usage) (Cursor’s extension marketplace). Search `Cursor Token Usage`, or:
+Install from [Open VSX](https://open-vsx.org/extension/vifaer/cursor-token-usage) (Cursor’s extension marketplace). Search `Cursor Token Usage`, or:
 
 ```bash
-cursor --install-extension akitogo.cursor-token-usage
+cursor --install-extension vifaer.cursor-token-usage
 ```
 
 #### From a VSIX
