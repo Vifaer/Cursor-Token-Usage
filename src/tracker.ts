@@ -99,12 +99,28 @@ export class UsageTracker {
   }
 
   getPanelContext(): import("./models").PanelContext {
+    const accounts = this.getPanelAccounts();
     return {
       data: this.getPanelData(),
       viewScope: this._viewScope,
       viewAccountId: this._viewAccountId,
       currentUserId: this._lastSnapshot?.userId ?? null,
+      statsRange: { mode: "cycle" },
+      accounts,
     };
+  }
+
+  getPanelAccounts(): UsageSnapshot[] {
+    if (this._viewScope === "account" && this._viewAccountId) {
+      const s = loadAccountSnapshot(this._viewAccountId);
+      return s ? [s] : [];
+    }
+    if (this._viewScope === "all") {
+      return dedupeByUserId(
+        [this._lastSnapshot, ...listOtherAccounts(this._lastSnapshot?.userId)].filter(Boolean) as UsageSnapshot[],
+      );
+    }
+    return this._lastSnapshot ? [this._lastSnapshot] : [];
   }
 
   getCombinedView(): CombinedViewDto | null {

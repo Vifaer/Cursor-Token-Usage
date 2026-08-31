@@ -10,6 +10,7 @@ import { deleteSecretToken, getSecretToken, initSecretStorage, storeSecretToken 
 import { runDiagnoseAuth, setExtensionPath } from "./credentials";
 import { CombinedViewDto, UsageAlert, UsageSnapshot, isCombinedView } from "./models";
 import { UsagePanel } from "./panel";
+import { resolveStatsRange } from "./dayStats";
 import { applyStatusBarColors, buildOverviewTooltip, buildTooltipLines, formatOverviewStatusBar, formatStatusBar } from "./render";
 import { UsageTracker } from "./tracker";
 import { formatTokens } from "./treeView";
@@ -382,26 +383,36 @@ async function switchAccountView(): Promise<void> {
 }
 
 async function exportUsage(): Promise<void> {
-  const data = tracker.getPanelData();
+  const data = UsagePanel.current?.getDisplayData() ?? tracker.getPanelData();
   if (!data) {
     vscode.window.showWarningMessage(vscode.l10n.t("No usage data to export"));
     return;
   }
+  const statsRange = UsagePanel.current?.statsRange ?? { mode: "cycle" as const };
+  const resolved = resolveStatsRange(statsRange);
+  const rangeSuffix =
+    statsRange.mode === "cycle" ? "cycle" : `${resolved.from}_${resolved.to}`.replace(/[^\d_-]/g, "");
+  const baseDir = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? "";
   const uri = await vscode.window.showSaveDialog({
     filters: { JSON: ["json"], CSV: ["csv"] },
-    defaultUri: vscode.Uri.file(path.join(vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? "", "cursor-usage-export.json")),
+    defaultUri: vscode.Uri.file(path.join(baseDir, `cursor-usage-${rangeSuffix}.json`)),
   });
   if (!uri) return;
   const ext = path.extname(uri.fsPath).toLowerCase();
   if (ext === ".csv") {
-    fs.writeFileSync(uri.fsPath, buildCsv(data), "utf8");
+    fs.writeFileSync(uri.fsPath, buildCsv(data, statsRange), "utf8");
   } else {
     fs.writeFileSync(uri.fsPath, JSON.stringify(data, null, 2), "utf8");
   }
   vscode.window.showInformationMessage(vscode.l10n.t("Exported to {0}", uri.fsPath));
 }
 
-function buildCsv(data: UsageSnapshot | CombinedViewDto): string {
+function buildCsv(data: UsageSnapshot | CombinedViewDto, statsRange?: import("./models").StatsRange): string {
+  const resolved = statsRange ? resolveStatsRange(statsRange) : { mode: "cycle" as const, from: "", to: "" };
+  const headerComment =
+    resolved.mode === "cycle" || !resolved.from
+      ? "# statsRange=cycle\n"
+      : `# statsRange=${resolved.from}..${resolved.to}\n`;
   if (isCombinedView(data)) {
     const header = "label,userId,membership,totalTokens,cacheHitRate,cacheRead,cacheWrite,input,output,overallUsedCents,overallLimitCents,updatedAt\n";
     const rows = data.perAccountRows
@@ -422,9 +433,9 @@ function buildCsv(data: UsageSnapshot | CombinedViewDto): string {
         ].join(","),
       )
       .join("\n");
-    return header + rows;
+    return headerComment + header + rows;
   }
-  return `label,userId,membership,totalTokens,cursorModelsPercent,otherModelsPercent\n${csvEscape(data.accountLabel ?? "")},${data.userId},${data.membershipType},${data.totalTokens},${data.cursorModelsPercent ?? ""},${data.otherModelsPercent ?? ""}\n`;
+  return headerComment + `label,userId,membership,totalTokens,cursorModelsPercent,otherModelsPercent\n${csvEscape(data.accountLabel ?? "")},${data.userId},${data.membershipType},${data.totalTokens},${data.cursorModelsPercent ?? ""},${data.otherModelsPercent ?? ""}\n`;
 }
 
 function csvEscape(value: string): string {

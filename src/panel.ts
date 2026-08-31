@@ -1,8 +1,9 @@
 import * as vscode from "vscode";
 import { sortCombinedAccountRows } from "./combinedView";
 import { computeCacheStats, formatHitRate } from "./cacheStats";
+import { applyStatsRange, resolveStatsRange } from "./dayStats";
 import { groupModelAggs, modelModeL10nKey, modelVariantMode } from "./modelNormalize";
-import { CombinedViewDto, PanelContext, UsageSnapshot, isCombinedView } from "./models";
+import { CombinedViewDto, PanelContext, PanelData, StatsRange, UsageSnapshot, isCombinedView } from "./models";
 import { buildTrendPoints, computeTrendRange, sumUsageCostCents } from "./trendData";
 import { formatCents, formatEventTime, formatPct, formatRelativeUpdated, formatTokens, isZh, membershipLabel, shortenModel } from "./treeView";
 
@@ -11,6 +12,7 @@ export class UsagePanel {
   private readonly panel: vscode.WebviewPanel;
   private readonly getContext: () => PanelContext;
   private readonly getError: () => string | null;
+  statsRange: StatsRange = { mode: "cycle" };
 
   static show(
     context: vscode.ExtensionContext,
@@ -44,7 +46,12 @@ export class UsagePanel {
     this.getContext = getContext;
     this.getError = getError;
     this.refresh();
-    panel.webview.onDidReceiveMessage((msg: { command?: string; userId?: string }) => {
+    panel.webview.onDidReceiveMessage((msg: { command?: string; userId?: string; range?: StatsRange }) => {
+      if (msg.command === "setStatsRange" && msg.range) {
+        this.setStatsRange(msg.range);
+        this.refresh();
+        return;
+      }
       if (msg.command) onMessage(msg.command, msg.userId ? { userId: msg.userId } : undefined);
     });
     panel.onDidDispose(() => {
@@ -52,9 +59,21 @@ export class UsagePanel {
     });
   }
 
-  refresh(): void {
+  setStatsRange(range: StatsRange): void {
+    this.statsRange = range;
+  }
+
+  getDisplayData(): PanelData | null {
     const ctx = this.getContext();
-    const data = ctx.data;
+    if (!ctx.data) return null;
+    return applyStatsRange(ctx.data, ctx.accounts, this.statsRange, ctx.currentUserId ?? undefined);
+  }
+
+  refresh(): void {
+    const base = this.getContext();
+    const statsRange = this.statsRange;
+    const data = applyStatsRange(base.data, base.accounts, statsRange, base.currentUserId ?? undefined);
+    const ctx: PanelContext = { ...base, data, statsRange };
     this.panel.title = isCombinedView(data)
       ? vscode.l10n.t("Cursor Token Usage · Overview")
       : ctx.viewScope === "account"
@@ -150,7 +169,7 @@ function heroPct(snapshot: UsageSnapshot): number {
   return Math.max(snapshot.cursorModelsPercent ?? 0, snapshot.otherModelsPercent ?? 0);
 }
 
-function renderTrend(snapshot: UsageSnapshot): string {
+function renderTrend(snapshot: UsageSnapshot, statsRange: StatsRange): string {
   const points = buildTrendPoints(snapshot.events, snapshot.dailyBuckets ?? []);
   if (points.length === 0) {
     return `<p class="empty">${escapeHtml(vscode.l10n.t("Not enough event data for a trend"))}</p>`;
@@ -162,7 +181,16 @@ function renderTrend(snapshot: UsageSnapshot): string {
     billingCycleEnd: snapshot.billingCycleEnd,
     dataDays: eventDays,
   });
-  const payload = JSON.stringify({ points, models, minDay, maxDay }).replace(/</g, "\\u003c");
+  const resolved = resolveStatsRange(statsRange);
+  const payload = JSON.stringify({
+    points,
+    models,
+    minDay,
+    maxDay,
+    statsMode: statsRange.mode,
+    initFrom: resolved.from,
+    initTo: resolved.to,
+  }).replace(/</g, "\\u003c");
   const modelOpts = [`<option value="">${escapeHtml(vscode.l10n.t("All models"))}</option>`]
     .concat(models.map((m) => `<option value="${escapeHtml(m)}">${escapeHtml(shortenModel(m))}</option>`))
     .join("");
@@ -257,13 +285,18 @@ function renderCostPill(opts: {
   overallLimit: number | null;
   onDemandCents: number | null;
   eventsComplete?: boolean;
+  rangeMode?: StatsRange["mode"];
 }): string {
   const hasPool = opts.overallUsed !== null && opts.overallLimit !== null;
   const poolText = hasPool ? `${formatCents(opts.overallUsed!)} / ${formatCents(opts.overallLimit!)}` : null;
+  const poolLabel =
+    opts.rangeMode && opts.rangeMode !== "cycle"
+      ? vscode.l10n.t("Pool usage (cycle)")
+      : vscode.l10n.t("Pool usage");
 
   if (opts.scope === "overview") {
     if (poolText) {
-      return `<div class="stat-pill"><span>${escapeHtml(vscode.l10n.t("Pool usage"))}</span><strong>${escapeHtml(poolText)}</strong></div>`;
+      return `<div class="stat-pill"><span>${escapeHtml(poolLabel)}</span><strong>${escapeHtml(poolText)}</strong></div>`;
     }
     if (opts.onDemandCents !== null && opts.onDemandCents > 0) {
       return `<div class="stat-pill"><span>${escapeHtml(vscode.l10n.t("On-Demand"))}</span><strong>${escapeHtml(formatCents(opts.onDemandCents))}</strong></div>`;
@@ -272,7 +305,7 @@ function renderCostPill(opts: {
   }
 
   if (poolText) {
-    return `<div class="stat-pill"><span>${escapeHtml(vscode.l10n.t("Pool usage"))}</span><strong>${escapeHtml(poolText)}</strong></div>`;
+    return `<div class="stat-pill"><span>${escapeHtml(poolLabel)}</span><strong>${escapeHtml(poolText)}</strong></div>`;
   }
   if (opts.eventCostCents > 0) {
     const partial =
@@ -299,6 +332,7 @@ function renderStatGrid(opts: {
   onDemandCents: number | null;
   eventsComplete?: boolean;
   extra?: string;
+  rangeMode?: StatsRange["mode"];
 }): string {
   const cacheWrite =
     opts.cacheWrite > 0
@@ -311,6 +345,7 @@ function renderStatGrid(opts: {
     overallLimit: opts.overallLimitCents,
     onDemandCents: opts.onDemandCents,
     eventsComplete: opts.eventsComplete,
+    rangeMode: opts.rangeMode,
   });
   const extra = opts.extra ? `<div class="stat-pill"><span>${escapeHtml(vscode.l10n.t("Reset"))}</span><strong>${escapeHtml(opts.extra)}</strong></div>` : "";
   return `<div class="stat-grid">
@@ -365,8 +400,33 @@ function renderByModel(
   }).join("");
 }
 
+function renderStatsRangeBar(statsRange: StatsRange): string {
+  const modes = ["cycle", "today", "yesterday", "7d"] as const;
+  const labels: Record<(typeof modes)[number], string> = {
+    cycle: vscode.l10n.t("All (billing cycle)"),
+    today: vscode.l10n.t("Today"),
+    yesterday: vscode.l10n.t("Yesterday"),
+    "7d": vscode.l10n.t("Last 7 days"),
+  };
+  const chips = modes
+    .map(
+      (m) =>
+        `<button type="button" class="range-chip${statsRange.mode === m ? " on" : ""}" data-stats-mode="${m}">${escapeHtml(labels[m])}</button>`,
+    )
+    .join("");
+  const resolved = resolveStatsRange(statsRange);
+  const rangeHint =
+    statsRange.mode !== "cycle" && resolved.from
+      ? `<p class="hint range-hint">${escapeHtml(vscode.l10n.t("Stats range: {0} ~ {1}", resolved.from, resolved.to))}<br>${escapeHtml(vscode.l10n.t("Token/cache/cost = selected range; pool usage = billing cycle"))}</p>`
+      : "";
+  return `<div class="stats-range-bar" role="group" aria-label="${escapeHtml(vscode.l10n.t("Stats range"))}">${chips}</div>${rangeHint}`;
+}
+
 function renderCombinedBody(data: CombinedViewDto, ctx: PanelContext): string {
-  const sortedRows = sortCombinedAccountRows(data.perAccountRows, { by: "updated" });
+  const sortBy = ctx.statsRange.mode === "cycle" ? "updated" : "tokens";
+  const sortedRows = sortCombinedAccountRows(data.perAccountRows, { by: sortBy });
+  const poolCol =
+    ctx.statsRange.mode !== "cycle" ? vscode.l10n.t("Pool % (cycle)") : vscode.l10n.t("Pool %");
   const rows = sortedRows
     .map((r) => {
       const fullTime = new Date(r.updatedAt).toLocaleString();
@@ -413,6 +473,7 @@ function renderCombinedBody(data: CombinedViewDto, ctx: PanelContext): string {
       </div>
       ${renderToolbar(ctx)}
     </header>
+    ${renderStatsRangeBar(ctx.statsRange)}
     ${renderStatGrid({
       scope: "overview",
       totalTokens: data.totalTokens,
@@ -424,18 +485,19 @@ function renderCombinedBody(data: CombinedViewDto, ctx: PanelContext): string {
       overallLimitCents: data.overallLimitCents,
       onDemandCents: data.onDemandUsedCents,
       eventsComplete: data.eventsComplete,
+      rangeMode: ctx.statsRange.mode,
     })}
     <section><h2>${escapeHtml(vscode.l10n.t("Per account ({0})", sortedRows.length))}</h2>
       <p class="hint">${escapeHtml(vscode.l10n.t("Click a row to view account details"))}</p>
       <div class="account-scroll">
-        <table class="account-table"><thead><tr><th>${escapeHtml(vscode.l10n.t("Account"))}</th><th>${escapeHtml(vscode.l10n.t("Plan"))}</th><th>${escapeHtml(vscode.l10n.t("Tokens"))}</th><th>${escapeHtml(vscode.l10n.t("Pool %"))}</th><th>${escapeHtml(vscode.l10n.t("Cache Hit"))}</th><th>${escapeHtml(vscode.l10n.t("Updated"))}</th></tr></thead><tbody>${rows}</tbody></table>
+        <table class="account-table"><thead><tr><th>${escapeHtml(vscode.l10n.t("Account"))}</th><th>${escapeHtml(vscode.l10n.t("Plan"))}</th><th>${escapeHtml(vscode.l10n.t("Tokens"))}</th><th>${escapeHtml(poolCol)}</th><th>${escapeHtml(vscode.l10n.t("Cache Hit"))}</th><th>${escapeHtml(vscode.l10n.t("Updated"))}</th></tr></thead><tbody>${rows}</tbody></table>
       </div>
     </section>
     <section><h2>${escapeHtml(vscode.l10n.t("By Model ({0} groups)", groupModelAggs(data.aggregations, data.events).length))}</h2>
       <p class="hint">${escapeHtml(vscode.l10n.t("Click a model row to filter the trend"))}</p>
       ${renderByModel(data.aggregations, data.events, data.totalTokens)}
     </section>
-    <section><h2>${escapeHtml(vscode.l10n.t("Usage Trend"))}</h2>${renderTrend(snapshotLike)}</section>`;
+    <section><h2>${escapeHtml(vscode.l10n.t("Usage Trend"))}</h2>${renderTrend(snapshotLike, ctx.statsRange)}</section>`;
 }
 
 function renderHtml(webview: vscode.Webview, ctx: PanelContext, error: string | null): string {
@@ -458,31 +520,32 @@ function renderHtml(webview: vscode.Webview, ctx: PanelContext, error: string | 
     body = renderCombinedBody(data, ctx);
   } else {
     const snapshot = data;
+    const cycleSnapshot = ctx.accounts[0] ?? snapshot;
     const cache = computeCacheStats(snapshot.aggregations, snapshot.events);
     const meters: string[] = [];
-    if (snapshot.overallUsedCents !== null && snapshot.overallLimitCents && snapshot.overallLimitCents > 0) {
-      const pct = (snapshot.overallUsedCents / snapshot.overallLimitCents) * 100;
+    if (cycleSnapshot.overallUsedCents !== null && cycleSnapshot.overallLimitCents && cycleSnapshot.overallLimitCents > 0) {
+      const pct = (cycleSnapshot.overallUsedCents / cycleSnapshot.overallLimitCents) * 100;
       meters.push(meter(
         vscode.l10n.t("Included usage"),
-        `${formatCents(snapshot.overallUsedCents)} / ${formatCents(snapshot.overallLimitCents)}`,
+        `${formatCents(cycleSnapshot.overallUsedCents)} / ${formatCents(cycleSnapshot.overallLimitCents)}`,
         pct,
-        snapshot.isUnlimited,
+        cycleSnapshot.isUnlimited,
       ));
     }
-    if (snapshot.displayMode !== "overall") {
-      if (snapshot.cursorModelsPercent !== null) {
-        meters.push(meter(vscode.l10n.t("Cursor Models"), formatPct(snapshot.cursorModelsPercent, snapshot.isUnlimited), snapshot.cursorModelsPercent, snapshot.isUnlimited));
+    if (cycleSnapshot.displayMode !== "overall") {
+      if (cycleSnapshot.cursorModelsPercent !== null) {
+        meters.push(meter(vscode.l10n.t("Cursor Models"), formatPct(cycleSnapshot.cursorModelsPercent, cycleSnapshot.isUnlimited), cycleSnapshot.cursorModelsPercent, cycleSnapshot.isUnlimited));
       }
-      if (snapshot.otherModelsPercent !== null) {
-        meters.push(meter(vscode.l10n.t("Other Models"), formatPct(snapshot.otherModelsPercent, snapshot.isUnlimited), snapshot.otherModelsPercent, snapshot.isUnlimited));
+      if (cycleSnapshot.otherModelsPercent !== null) {
+        meters.push(meter(vscode.l10n.t("Other Models"), formatPct(cycleSnapshot.otherModelsPercent, cycleSnapshot.isUnlimited), cycleSnapshot.otherModelsPercent, cycleSnapshot.isUnlimited));
       }
     }
-    if ((snapshot.onDemandEnabled || /enterprise|team/i.test(snapshot.membershipType)) && snapshot.onDemandUsedCents !== null) {
-      const limit = snapshot.onDemandLimitCents && snapshot.onDemandLimitCents > 0 ? snapshot.onDemandLimitCents : null;
-      const pct = limit ? (snapshot.onDemandUsedCents / limit) * 100 : 0;
+    if ((cycleSnapshot.onDemandEnabled || /enterprise|team/i.test(cycleSnapshot.membershipType)) && cycleSnapshot.onDemandUsedCents !== null) {
+      const limit = cycleSnapshot.onDemandLimitCents && cycleSnapshot.onDemandLimitCents > 0 ? cycleSnapshot.onDemandLimitCents : null;
+      const pct = limit ? (cycleSnapshot.onDemandUsedCents / limit) * 100 : 0;
       const text = limit
-        ? `${formatCents(snapshot.onDemandUsedCents)} / ${formatCents(limit)}`
-        : formatCents(snapshot.onDemandUsedCents);
+        ? `${formatCents(cycleSnapshot.onDemandUsedCents)} / ${formatCents(limit)}`
+        : formatCents(cycleSnapshot.onDemandUsedCents);
       meters.push(meter(vscode.l10n.t("On-Demand"), text, pct));
     }
 
@@ -511,12 +574,13 @@ function renderHtml(webview: vscode.Webview, ctx: PanelContext, error: string | 
         </div>
         ${renderToolbar(ctx)}
       </header>
+      ${renderStatsRangeBar(ctx.statsRange)}
       ${ring(
-        heroPct(snapshot),
-        heroHeadline(snapshot),
-        countdown(snapshot.billingCycleEnd),
-        snapshot.isUnlimited,
-        snapshot.displayMode === "overall"
+        heroPct(cycleSnapshot),
+        heroHeadline(cycleSnapshot),
+        countdown(cycleSnapshot.billingCycleEnd),
+        cycleSnapshot.isUnlimited,
+        cycleSnapshot.displayMode === "overall"
           ? vscode.l10n.t("Included usage")
           : vscode.l10n.t("Pool usage"),
       )}
@@ -528,13 +592,14 @@ function renderHtml(webview: vscode.Webview, ctx: PanelContext, error: string | 
           cacheRead: cache.cacheReadTokens,
           cacheWrite: cache.cacheWriteTokens,
           eventCostCents: sumUsageCostCents(snapshot.events, snapshot.dailyBuckets ?? []),
-          overallUsedCents: snapshot.overallUsedCents,
-          overallLimitCents: snapshot.overallLimitCents,
-          onDemandCents: snapshot.onDemandUsedCents,
+          overallUsedCents: cycleSnapshot.overallUsedCents,
+          overallLimitCents: cycleSnapshot.overallLimitCents,
+          onDemandCents: cycleSnapshot.onDemandUsedCents,
           eventsComplete: snapshot.eventsComplete,
+          rangeMode: ctx.statsRange.mode,
         })}
       </section>
-      <section><h2>${escapeHtml(vscode.l10n.t("Usage Trend"))}</h2>${renderTrend(snapshot)}</section>
+      <section><h2>${escapeHtml(vscode.l10n.t("Usage Trend"))}</h2>${renderTrend(snapshot, ctx.statsRange)}</section>
       <section><h2>${escapeHtml(vscode.l10n.t("Billing Cycle"))}</h2>${meters.join("") || `<p class="empty">${escapeHtml(vscode.l10n.t("No data"))}</p>`}</section>
       <section><h2>${escapeHtml(vscode.l10n.t("By Model ({0} groups)", groupModelAggs(snapshot.aggregations, snapshot.events).length))}</h2>
         <p class="hint">${escapeHtml(vscode.l10n.t("Click a model row to filter the trend"))}</p>
@@ -596,6 +661,14 @@ header h1 { margin: 0; font-size: 20px; letter-spacing: .01em; }
 .stat-pill strong { display: block; color: var(--text); font-size: 16px; font-variant-numeric: tabular-nums; }
 .stat-pill small { display: block; font-size: 10px; margin-top: 2px; color: var(--muted); }
 .stat-pill.accent { border-color: color-mix(in srgb, var(--accent) 40%, var(--line)); }
+.stats-range-bar { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 10px; }
+.range-chip {
+  background: transparent; color: var(--muted); border: 1px solid var(--line);
+  border-radius: 99px; padding: 4px 12px; font-size: 12px; cursor: pointer;
+}
+.range-chip.on { background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--accent); border-color: color-mix(in srgb, var(--accent) 40%, var(--line)); }
+.range-chip:hover { background: var(--hover); color: var(--text); }
+.range-hint { margin: -4px 0 12px !important; }
 .toolbar { display: flex; align-items: center; justify-content: flex-end; gap: 6px; flex-wrap: wrap; flex: 0 0 auto; }
 .toolbar-divider { width: 1px; height: 16px; background: var(--line); margin: 0 2px; }
 .btn-primary {
@@ -762,6 +835,12 @@ document.querySelectorAll(".drill-row").forEach((row) => {
     if (userId) vscode.postMessage({ command: "drillAccount", userId });
   });
 });
+document.querySelectorAll("[data-stats-mode]").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    const mode = btn.getAttribute("data-stats-mode");
+    if (mode) vscode.postMessage({ command: "setStatsRange", range: { mode } });
+  });
+});
 (function menuSetup() {
   const toggle = document.getElementById("menu-toggle");
   const panel = document.getElementById("menu-panel");
@@ -810,6 +889,7 @@ document.querySelectorAll(".drill-row").forEach((row) => {
   const points = payload.points || [];
   const minDay = payload.minDay || "";
   const maxDay = payload.maxDay || "";
+  const statsMode = payload.statsMode || "cycle";
   const saved = (typeof vscode.getState === "function" && vscode.getState()) || {};
   let metric = saved.metric === "cost" ? "cost" : "token";
   let model = typeof saved.model === "string" ? saved.model : "";
@@ -827,12 +907,30 @@ document.querySelectorAll(".drill-row").forEach((row) => {
   function last7() {
     return clampDay(isoAdd(maxDay, -6));
   }
-  let from = saved.from && saved.from >= minDay && saved.from <= maxDay ? saved.from : last7();
-  let to = saved.to && saved.to >= minDay && saved.to <= maxDay ? saved.to : maxDay;
-  if (from > to) { from = last7(); to = maxDay; }
+  let from;
+  let to;
+  if (statsMode !== "cycle" && payload.initFrom && payload.initTo) {
+    from = clampDay(payload.initFrom);
+    to = clampDay(payload.initTo);
+  } else {
+    from = saved.from && saved.from >= minDay && saved.from <= maxDay ? saved.from : last7();
+    to = saved.to && saved.to >= minDay && saved.to <= maxDay ? saved.to : maxDay;
+    if (from > to) { from = last7(); to = maxDay; }
+  }
 
   function persist() {
-    if (typeof vscode.setState === "function") vscode.setState({ metric, model, from, to });
+    if (typeof vscode.setState === "function") {
+      if (statsMode === "cycle") vscode.setState({ metric, model, from, to });
+      else vscode.setState({ metric, model });
+    }
+  }
+  let rangeDebounce;
+  function notifyRangeChange() {
+    if (statsMode === "cycle") { render(); return; }
+    clearTimeout(rangeDebounce);
+    rangeDebounce = setTimeout(() => {
+      vscode.postMessage({ command: "setStatsRange", range: { mode: "custom", from, to } });
+    }, 300);
   }
   function eachDay(a, b) {
     const out = [];
@@ -1033,8 +1131,24 @@ document.querySelectorAll(".drill-row").forEach((row) => {
   }
   const fromEl = document.getElementById("trend-from");
   const toEl = document.getElementById("trend-to");
-  if (fromEl) { fromEl.value = from; fromEl.addEventListener("change", () => { from = fromEl.value || minDay; if (to && from > to) from = to; fromEl.value = from; render(); }); }
-  if (toEl) { toEl.value = to; toEl.addEventListener("change", () => { to = toEl.value || maxDay; if (from && to < from) to = from; toEl.value = to; render(); }); }
+  if (fromEl) {
+    fromEl.value = from;
+    fromEl.addEventListener("change", () => {
+      from = clampDay(fromEl.value || minDay);
+      if (to && from > to) from = to;
+      fromEl.value = from;
+      notifyRangeChange();
+    });
+  }
+  if (toEl) {
+    toEl.value = to;
+    toEl.addEventListener("change", () => {
+      to = clampDay(toEl.value || maxDay);
+      if (from && to < from) to = from;
+      toEl.value = to;
+      notifyRangeChange();
+    });
+  }
   function applyModelFilter(v) {
     if (!v) return;
     model = v;

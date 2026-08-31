@@ -76,6 +76,14 @@ export interface UsageAlert {
 
 export type ViewScope = "current" | "all" | "account";
 
+export type StatsRangeMode = "cycle" | "today" | "yesterday" | "7d" | "custom";
+
+export interface StatsRange {
+  mode: StatsRangeMode;
+  from?: string;
+  to?: string;
+}
+
 export interface CombinedAccountRow {
   userId: string;
   label: string;
@@ -121,6 +129,8 @@ export interface PanelContext {
   viewScope: ViewScope;
   viewAccountId: string | null;
   currentUserId: string | null;
+  statsRange: StatsRange;
+  accounts: UsageSnapshot[];
 }
 
 export interface SessionInfo {

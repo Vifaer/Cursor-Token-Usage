@@ -169,5 +169,14 @@
   "Model mode high-thinking": "高阶·思考",
   "Model mode medium-thinking": "中等·思考",
   "Model mode low-thinking": "低·思考",
-  "Auto-routed models (often Composer Fast)": "自动路由模型（常为 Composer 快速版）"
+  "Auto-routed models (often Composer Fast)": "自动路由模型（常为 Composer 快速版）",
+  "All (billing cycle)": "全部（本周期）",
+  "Today": "今日",
+  "Yesterday": "昨日",
+  "Last 7 days": "近 7 日",
+  "Stats range": "统计范围",
+  "Stats range: {0} ~ {1}": "统计范围：{0} ~ {1}",
+  "Token/cache/cost = selected range; pool usage = billing cycle": "Token/缓存/费用为所选范围；套餐用量为计费周期",
+  "Pool % (cycle)": "套餐用量（周期）",
+  "Pool usage (cycle)": "套餐用量（周期）"
 }
