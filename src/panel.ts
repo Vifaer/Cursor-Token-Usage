@@ -4,7 +4,7 @@ import { computeCacheStats, formatHitRate } from "./cacheStats";
 import { applyStatsRange, resolveStatsRange } from "./dayStats";
 import { groupModelAggs, modelModeL10nKey, modelVariantMode } from "./modelNormalize";
 import { CombinedViewDto, PanelContext, PanelData, StatsRange, UsageSnapshot, isCombinedView } from "./models";
-import { buildTrendPoints, computeTrendRange, sumUsageCostCents } from "./trendData";
+import { buildTrendPoints, computeTrendRange, dayKeyFromTs, sumUsageCostCents } from "./trendData";
 import { formatCents, formatEventTime, formatPct, formatRelativeUpdated, formatTokens, isZh, membershipLabel, shortenModel } from "./treeView";
 
 export class UsagePanel {
@@ -18,7 +18,7 @@ export class UsagePanel {
     context: vscode.ExtensionContext,
     getContext: () => PanelContext,
     getError: () => string | null,
-    onMessage: (command: string, payload?: { userId?: string }) => void,
+    onMessage: (command: string, payload?: { userId?: string; range?: StatsRange }) => void,
   ): UsagePanel {
     if (UsagePanel.current) {
       UsagePanel.current.refresh();
@@ -40,20 +40,27 @@ export class UsagePanel {
     panel: vscode.WebviewPanel,
     getContext: () => PanelContext,
     getError: () => string | null,
-    onMessage: (command: string, payload?: { userId?: string }) => void,
+    onMessage: (command: string, payload?: { userId?: string; range?: StatsRange }) => void,
   ) {
     this.panel = panel;
     this.getContext = getContext;
     this.getError = getError;
     this.refresh();
-    panel.webview.onDidReceiveMessage((msg: { command?: string; userId?: string; range?: StatsRange }) => {
-      if (msg.command === "setStatsRange" && msg.range) {
-        this.setStatsRange(msg.range);
-        this.refresh();
-        return;
-      }
-      if (msg.command) onMessage(msg.command, msg.userId ? { userId: msg.userId } : undefined);
-    });
+    panel.webview.onDidReceiveMessage(
+      (msg: { command?: string; userId?: string; range?: StatsRange }) => {
+        if (msg.command === "setStatsRange" && msg.range) {
+          this.setStatsRange(msg.range);
+          this.refresh();
+          return;
+        }
+        if (msg.command === "queryStatsRange" && msg.range) {
+          this.setStatsRange(msg.range);
+          onMessage("queryStatsRange", { range: msg.range });
+          return;
+        }
+        if (msg.command) onMessage(msg.command, msg.userId ? { userId: msg.userId } : undefined);
+      },
+    );
     panel.onDidDispose(() => {
       if (UsagePanel.current === this) UsagePanel.current = undefined;
     });
@@ -350,7 +357,7 @@ function renderStatGrid(opts: {
   const extra = opts.extra ? `<div class="stat-pill"><span>${escapeHtml(vscode.l10n.t("Reset"))}</span><strong>${escapeHtml(opts.extra)}</strong></div>` : "";
   return `<div class="stat-grid">
     <div class="stat-pill"><span>${escapeHtml(vscode.l10n.t("Total Tokens"))}</span><strong>${escapeHtml(formatTokens(opts.totalTokens))}</strong></div>
-    <div class="stat-pill accent"><span>${escapeHtml(vscode.l10n.t("Cache Hit Rate"))}</span><strong>${escapeHtml(formatHitRate(opts.cacheHitRate))}</strong><small>${escapeHtml(vscode.l10n.t("read / (read + input)"))}</small></div>
+    <div class="stat-pill accent"><span>${escapeHtml(vscode.l10n.t("Cache Hit Rate"))}</span><strong>${escapeHtml(formatHitRate(opts.cacheHitRate))}</strong><small>${escapeHtml(vscode.l10n.t("read / (read + input + write)"))}</small></div>
     <div class="stat-pill"><span>${escapeHtml(vscode.l10n.t("Cache Read"))}</span><strong>${escapeHtml(formatTokens(opts.cacheRead))}</strong></div>
     ${cacheWrite}${costPill}${extra}
   </div>`;
@@ -400,7 +407,18 @@ function renderByModel(
   }).join("");
 }
 
-function renderStatsRangeBar(statsRange: StatsRange): string {
+function formatCacheReadWrite(read: number, write: number): string {
+  const r = formatTokens(read);
+  if (write > 0) {
+    return vscode.l10n.t("Read {0} · Write {1}", r, formatTokens(write));
+  }
+  return vscode.l10n.t("Read {0}", r);
+}
+
+function renderStatsRangeBar(
+  statsRange: StatsRange,
+  bounds: { minDay: string; maxDay: string },
+): string {
   const modes = ["cycle", "today", "yesterday", "7d"] as const;
   const labels: Record<(typeof modes)[number], string> = {
     cycle: vscode.l10n.t("All (billing cycle)"),
@@ -415,19 +433,50 @@ function renderStatsRangeBar(statsRange: StatsRange): string {
     )
     .join("");
   const resolved = resolveStatsRange(statsRange);
+  const fromVal = resolved.from || bounds.minDay;
+  const toVal = resolved.to || bounds.maxDay;
   const rangeHint =
     statsRange.mode !== "cycle" && resolved.from
-      ? `<p class="hint range-hint">${escapeHtml(vscode.l10n.t("Stats range: {0} ~ {1}", resolved.from, resolved.to))}<br>${escapeHtml(vscode.l10n.t("Token/cache/cost = selected range; pool usage = billing cycle"))}</p>`
-      : "";
-  return `<div class="stats-range-bar" role="group" aria-label="${escapeHtml(vscode.l10n.t("Stats range"))}">${chips}</div>${rangeHint}`;
+      ? `<p class="hint range-hint">${escapeHtml(vscode.l10n.t("Stats range: {0} ~ {1}", resolved.from, resolved.to))}<br>${escapeHtml(vscode.l10n.t("Token/cache/cost = selected range; pool usage = billing cycle"))}<br>${escapeHtml(vscode.l10n.t("Query refreshes the current account only; other accounts use cached data"))}</p>`
+      : `<p class="hint range-hint">${escapeHtml(vscode.l10n.t("Query refreshes the current account only; other accounts use cached data"))}</p>`;
+  return `<div class="stats-range-bar" role="group" aria-label="${escapeHtml(vscode.l10n.t("Stats range"))}">
+    ${chips}
+    <label class="range-date">${escapeHtml(vscode.l10n.t("From"))} <input type="date" id="stats-from" min="${bounds.minDay}" max="${bounds.maxDay}" value="${fromVal}"></label>
+    <label class="range-date">${escapeHtml(vscode.l10n.t("To"))} <input type="date" id="stats-to" min="${bounds.minDay}" max="${bounds.maxDay}" value="${toVal}"></label>
+    <button type="button" class="range-query" id="stats-query">${escapeHtml(vscode.l10n.t("Query"))}</button>
+  </div>${rangeHint}`;
+}
+
+function trendBoundsFor(snapshot: {
+  billingCycleStart: string;
+  billingCycleEnd: string;
+  events: { timestamp: number }[];
+  dailyBuckets?: { day: string }[];
+}): { minDay: string; maxDay: string } {
+  const dataDays = [
+    ...snapshot.events.map((e) => dayKeyFromTs(e.timestamp)),
+    ...(snapshot.dailyBuckets ?? []).map((b) => b.day),
+  ];
+  return computeTrendRange({
+    billingCycleStart: snapshot.billingCycleStart,
+    billingCycleEnd: snapshot.billingCycleEnd,
+    dataDays,
+  });
 }
 
 function renderCombinedBody(data: CombinedViewDto, ctx: PanelContext): string {
-  const sortBy = ctx.statsRange.mode === "cycle" ? "updated" : "tokens";
-  const sortedRows = sortCombinedAccountRows(data.perAccountRows, { by: sortBy });
-  const poolCol =
-    ctx.statsRange.mode !== "cycle" ? vscode.l10n.t("Pool % (cycle)") : vscode.l10n.t("Pool %");
-  const rows = sortedRows
+  const rangeMode = ctx.statsRange.mode !== "cycle";
+  const sortBy = rangeMode ? "tokens" : "updated";
+  const sortedRows = sortCombinedAccountRows(data.perAccountRows, {
+    by: sortBy,
+    preferFresh: !rangeMode,
+  });
+  const visibleRows = rangeMode ? sortedRows.filter((r) => r.totalTokens > 0) : sortedRows;
+  const hiddenZeros = rangeMode ? sortedRows.length - visibleRows.length : 0;
+  const poolCol = rangeMode ? vscode.l10n.t("Pool % (cycle)") : vscode.l10n.t("Pool %");
+  // Display invariant: header total must match sum of all rows (including hidden zeros).
+  const displayTotal = sortedRows.reduce((s, r) => s + r.totalTokens, 0);
+  const rows = visibleRows
     .map((r) => {
       const fullTime = new Date(r.updatedAt).toLocaleString();
       return `<tr class="clickable drill-row" data-user-id="${escapeHtml(r.userId)}" title="${escapeHtml(vscode.l10n.t("Click to view account details"))}">
@@ -435,7 +484,7 @@ function renderCombinedBody(data: CombinedViewDto, ctx: PanelContext): string {
       <td>${escapeHtml(membershipLabel(r.membershipType))}</td>
       <td class="num">${escapeHtml(formatTokens(r.totalTokens))}</td>
       <td class="num">${r.overallUsedCents !== null && r.overallLimitCents !== null ? `${formatCents(r.overallUsedCents)}/${formatCents(r.overallLimitCents)}` : `${formatPct(r.cursorModelsPercent, false)} / ${formatPct(r.otherModelsPercent, false)}`}</td>
-      <td class="num">${escapeHtml(formatHitRate(r.cacheHitRate))}<small>${escapeHtml(formatTokens(r.cacheReadTokens))}/${escapeHtml(formatTokens(r.cacheWriteTokens))}</small></td>
+      <td class="num">${escapeHtml(formatHitRate(r.cacheHitRate))}<small>${escapeHtml(formatCacheReadWrite(r.cacheReadTokens, r.cacheWriteTokens))}</small></td>
       <td title="${escapeHtml(fullTime)}">${escapeHtml(formatRelativeUpdated(r.updatedAt))}</td>
     </tr>`;
     })
@@ -461,8 +510,19 @@ function renderCombinedBody(data: CombinedViewDto, ctx: PanelContext): string {
     aggregations: data.aggregations,
     events: data.events,
     eventsComplete: true,
-    totalTokens: data.totalTokens,
+    totalTokens: displayTotal,
   };
+
+  const usageHint = rangeMode
+    ? hiddenZeros > 0
+      ? `<p class="hint">${escapeHtml(vscode.l10n.t("Showing {0} accounts with usage; {1} with zero hidden", visibleRows.length, hiddenZeros))}</p>`
+      : `<p class="hint">${escapeHtml(vscode.l10n.t("Showing {0} accounts with usage in this range", visibleRows.length))}</p>`
+    : `<p class="hint">${escapeHtml(vscode.l10n.t("Click a row to view account details"))}</p>`;
+
+  const emptyRows =
+    rangeMode && visibleRows.length === 0
+      ? `<tr><td colspan="6" class="empty">${escapeHtml(vscode.l10n.t("No accounts with usage in this range"))}</td></tr>`
+      : rows;
 
   return `
     <header class="page-header">
@@ -473,10 +533,10 @@ function renderCombinedBody(data: CombinedViewDto, ctx: PanelContext): string {
       </div>
       ${renderToolbar(ctx)}
     </header>
-    ${renderStatsRangeBar(ctx.statsRange)}
+    ${renderStatsRangeBar(ctx.statsRange, trendBoundsFor(snapshotLike))}
     ${renderStatGrid({
       scope: "overview",
-      totalTokens: data.totalTokens,
+      totalTokens: displayTotal,
       cacheHitRate: data.cacheHitRate,
       cacheRead: data.cacheReadTokens,
       cacheWrite: data.cacheWriteTokens,
@@ -487,15 +547,15 @@ function renderCombinedBody(data: CombinedViewDto, ctx: PanelContext): string {
       eventsComplete: data.eventsComplete,
       rangeMode: ctx.statsRange.mode,
     })}
-    <section><h2>${escapeHtml(vscode.l10n.t("Per account ({0})", sortedRows.length))}</h2>
-      <p class="hint">${escapeHtml(vscode.l10n.t("Click a row to view account details"))}</p>
+    <section><h2>${escapeHtml(vscode.l10n.t("Per account ({0})", visibleRows.length))}</h2>
+      ${usageHint}
       <div class="account-scroll">
-        <table class="account-table"><thead><tr><th>${escapeHtml(vscode.l10n.t("Account"))}</th><th>${escapeHtml(vscode.l10n.t("Plan"))}</th><th>${escapeHtml(vscode.l10n.t("Tokens"))}</th><th>${escapeHtml(poolCol)}</th><th>${escapeHtml(vscode.l10n.t("Cache Hit"))}</th><th>${escapeHtml(vscode.l10n.t("Updated"))}</th></tr></thead><tbody>${rows}</tbody></table>
+        <table class="account-table"><thead><tr><th>${escapeHtml(vscode.l10n.t("Account"))}</th><th>${escapeHtml(vscode.l10n.t("Plan"))}</th><th>${escapeHtml(vscode.l10n.t("Tokens"))}</th><th>${escapeHtml(poolCol)}</th><th>${escapeHtml(vscode.l10n.t("Cache Hit"))}</th><th>${escapeHtml(vscode.l10n.t("Updated"))}</th></tr></thead><tbody>${emptyRows}</tbody></table>
       </div>
     </section>
     <section><h2>${escapeHtml(vscode.l10n.t("By Model ({0} groups)", groupModelAggs(data.aggregations, data.events).length))}</h2>
       <p class="hint">${escapeHtml(vscode.l10n.t("Click a model row to filter the trend"))}</p>
-      ${renderByModel(data.aggregations, data.events, data.totalTokens)}
+      ${renderByModel(data.aggregations, data.events, displayTotal)}
     </section>
     <section><h2>${escapeHtml(vscode.l10n.t("Usage Trend"))}</h2>${renderTrend(snapshotLike, ctx.statsRange)}</section>`;
 }
@@ -574,7 +634,7 @@ function renderHtml(webview: vscode.Webview, ctx: PanelContext, error: string | 
         </div>
         ${renderToolbar(ctx)}
       </header>
-      ${renderStatsRangeBar(ctx.statsRange)}
+      ${renderStatsRangeBar(ctx.statsRange, trendBoundsFor(cycleSnapshot))}
       ${ring(
         heroPct(cycleSnapshot),
         heroHeadline(cycleSnapshot),
@@ -661,13 +721,24 @@ header h1 { margin: 0; font-size: 20px; letter-spacing: .01em; }
 .stat-pill strong { display: block; color: var(--text); font-size: 16px; font-variant-numeric: tabular-nums; }
 .stat-pill small { display: block; font-size: 10px; margin-top: 2px; color: var(--muted); }
 .stat-pill.accent { border-color: color-mix(in srgb, var(--accent) 40%, var(--line)); }
-.stats-range-bar { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 10px; }
+.stats-range-bar { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 0 0 10px; }
 .range-chip {
   background: transparent; color: var(--muted); border: 1px solid var(--line);
   border-radius: 99px; padding: 4px 12px; font-size: 12px; cursor: pointer;
 }
 .range-chip.on { background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--accent); border-color: color-mix(in srgb, var(--accent) 40%, var(--line)); }
 .range-chip:hover { background: var(--hover); color: var(--text); }
+.range-date { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; color: var(--muted); }
+.range-date input[type="date"] {
+  border: 1px solid var(--line); background: var(--card); color: var(--text);
+  border-radius: 6px; padding: 3px 6px; font-size: 12px;
+}
+.range-query {
+  border: 1px solid color-mix(in srgb, var(--accent) 40%, var(--line));
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  color: var(--accent); border-radius: 99px; padding: 4px 12px; font-size: 12px; cursor: pointer;
+}
+.range-query:hover { background: color-mix(in srgb, var(--accent) 22%, transparent); }
 .range-hint { margin: -4px 0 12px !important; }
 .toolbar { display: flex; align-items: center; justify-content: flex-end; gap: 6px; flex-wrap: wrap; flex: 0 0 auto; }
 .toolbar-divider { width: 1px; height: 16px; background: var(--line); margin: 0 2px; }
@@ -841,6 +912,18 @@ document.querySelectorAll("[data-stats-mode]").forEach((btn) => {
     if (mode) vscode.postMessage({ command: "setStatsRange", range: { mode } });
   });
 });
+(function statsQuerySetup() {
+  const q = document.getElementById("stats-query");
+  const fromEl = document.getElementById("stats-from");
+  const toEl = document.getElementById("stats-to");
+  if (!q || !fromEl || !toEl) return;
+  q.addEventListener("click", () => {
+    const from = fromEl.value;
+    const to = toEl.value;
+    if (!from || !to) return;
+    vscode.postMessage({ command: "queryStatsRange", range: { mode: "custom", from, to } });
+  });
+})();
 (function menuSetup() {
   const toggle = document.getElementById("menu-toggle");
   const panel = document.getElementById("menu-panel");
@@ -920,13 +1003,11 @@ document.querySelectorAll("[data-stats-mode]").forEach((btn) => {
 
   function persist() {
     if (typeof vscode.setState === "function") {
-      if (statsMode === "cycle") vscode.setState({ metric, model, from, to });
-      else vscode.setState({ metric, model });
+      vscode.setState({ metric, model, from, to });
     }
   }
   let rangeDebounce;
   function notifyRangeChange() {
-    if (statsMode === "cycle") { render(); return; }
     clearTimeout(rangeDebounce);
     rangeDebounce = setTimeout(() => {
       vscode.postMessage({ command: "setStatsRange", range: { mode: "custom", from, to } });

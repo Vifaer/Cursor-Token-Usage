@@ -111,6 +111,30 @@ describe("snapshotRangeSlice", () => {
     assert.equal(slice.totalTokens, 50);
   });
 
+  it("does not double-count historical day when both bucket and events exist", () => {
+    const yMs = now - 36 * 60 * 60 * 1000;
+    const y = dayKeyFromTs(yMs);
+    const bucket: DailyBucket = {
+      day: y,
+      totalTokens: 50,
+      inputTokens: 50,
+      outputTokens: 0,
+      cacheWriteTokens: 0,
+      cacheReadTokens: 0,
+      totalCents: 0,
+      requestCount: 1,
+      byModel: [{ model: "m", inputTokens: 50, outputTokens: 0, cacheWriteTokens: 0, cacheReadTokens: 0, totalTokens: 50 }],
+    };
+    const s = snap({
+      userId: "u1",
+      dailyBuckets: [bucket],
+      events: [ev({ timestamp: yMs, totalTokens: 99, inputTokens: 99 })],
+    });
+    const slice = snapshotRangeSlice(s, y, y, today);
+    assert.equal(slice.totalTokens, 50);
+    assert.equal(slice.events.length, 0);
+  });
+
   it("ignores cycle aggregations when slicing", () => {
     const s = snap({
       userId: "u1",
@@ -138,6 +162,7 @@ describe("buildCombinedViewForRange", () => {
 
 describe("applyStatsRange", () => {
   const now = Date.parse("2026-08-31T12:00:00");
+  const today = dayKeyFromTs(now);
 
   it("cycle returns same reference", () => {
     const a1 = snap({ userId: "a1" });
@@ -153,7 +178,7 @@ describe("applyStatsRange", () => {
       totalTokens: 1000,
       events: [ev({ timestamp: now, totalTokens: 5, inputTokens: 5 })],
     });
-    const out = applyStatsRange(a1, [a1], { mode: "today" }, "a1") as UsageSnapshot;
+    const out = applyStatsRange(a1, [a1], { mode: "custom", from: today, to: today }, "a1") as UsageSnapshot;
     assert.equal(out.totalTokens, 5);
     assert.equal(out.events.length, 1);
   });

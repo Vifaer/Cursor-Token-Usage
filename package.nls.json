@@ -12,6 +12,7 @@
   "cmd.switchAccountView": "Switch Account View",
   "cmd.toggleStatusBarDataSource": "Toggle Status Bar: Current / Overview",
   "cmd.exportUsage": "Export Usage",
+  "cmd.importLegacyAccounts": "Restore multi-account history from akitogo (legacy)",
   "config.title": "Cursor Token Usage",
   "config.displayCount": "Recent usage rows in details panel",
   "config.pollingInterval": "Polling interval in seconds (5-300)",

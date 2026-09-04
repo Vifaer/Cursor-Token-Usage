@@ -1,16 +1,26 @@
 import * as vscode from "vscode";
 import { fetchUsage } from "./api";
 import {
+  dropAccountSession,
+  listAccountSessions,
+  MAX_STORED_SESSION_POLLS,
+  upsertAccountSession,
+} from "./accountSessions";
+import {
   buildCombinedView,
   hydrateSnapshot,
   listAccountSnapshots,
   loadAccountSnapshot,
   parseSavedViewScope,
+  pruneIdentityGhosts,
   saveAccountSnapshot,
   saveViewScope,
 } from "./accountStore";
 import { mergeEvents } from "./mergeEvents";
+import { getSession, readFileIdentityHints } from "./credentials";
 import { CombinedViewDto, UsageAlert, UsageSnapshot, ViewScope } from "./models";
+import { dayEndMs, dayStartMs } from "./trendData";
+import { applyFetchedRange, normalizeEventTimestamps } from "./dailyBuckets";
 
 const log = vscode.window.createOutputChannel("Cursor Token Usage - Tracker");
 
@@ -242,6 +252,8 @@ export class UsageTracker {
         snapshot = hydrateSnapshot(stored, snapshot);
         this._lastSnapshot = snapshot;
         await saveAccountSnapshot(snapshot);
+        await this.pruneGhostAccounts(snapshot.userId);
+        await this.refreshStoredSessions(snapshot, signal, ts, pollId);
         this._onUpdate?.();
         return true;
       }
@@ -264,6 +276,8 @@ export class UsageTracker {
       );
       this._lastSnapshot = snapshot;
       await saveAccountSnapshot(snapshot);
+      await this.pruneGhostAccounts(snapshot.userId);
+      await this.refreshStoredSessions(snapshot, signal, ts, pollId);
 
       if (prev && !wasRecovering && prev.userId === snapshot.userId) this.checkAlerts(prev, snapshot);
 
@@ -333,6 +347,126 @@ export class UsageTracker {
       }
     }
     if (alerts.length > 0) this._onAlert?.(alerts);
+  }
+
+  /** Drop empty Sentry-mislabeled rows after JWT identity fix. */
+  private async pruneGhostAccounts(currentUserId: string): Promise<void> {
+    try {
+      const hints = await readFileIdentityHints();
+      const removed = await pruneIdentityGhosts({
+        currentUserId,
+        staleUserIds: hints.userId ? [hints.userId] : [],
+        staleEmails: hints.email ? [hints.email] : [],
+      });
+      if (removed > 0) {
+        log.appendLine(`[cursor-token-usage] pruned ${removed} identity ghost account(s)`);
+      }
+    } catch (err) {
+      log.appendLine(`[cursor-token-usage] prune ghosts: ${err}`);
+    }
+  }
+
+  /** Upsert current JWT; lite-poll other retained JWTs (never same accessToken). */
+  private async refreshStoredSessions(
+    current: UsageSnapshot,
+    signal: AbortSignal,
+    ts: string,
+    pollId: number,
+  ): Promise<void> {
+    try {
+      const session = await getSession();
+      if (session && session.userId === current.userId) {
+        const email = current.accountLabel?.includes("@") ? current.accountLabel : undefined;
+        await upsertAccountSession(session.cookieValue, email);
+      }
+      const others = await listAccountSessions({
+        excludeAccessToken: session?.accessToken,
+        excludeUserId: current.userId,
+        limit: MAX_STORED_SESSION_POLLS,
+      });
+      if (others.length === 0 || signal.aborted) return;
+      log.appendLine(`[${ts}] poll#${pollId} refreshing ${others.length} stored session(s)`);
+      await Promise.all(
+        others.map(async (s) => {
+          if (signal.aborted) return;
+          const r = await fetchUsage({
+            fullEvents: false,
+            signal,
+            session: s,
+            accountLabel: s.email,
+            primary: false,
+          });
+          if (r.authError) {
+            log.appendLine(`[${ts}] poll#${pollId} drop stored ${s.userId.slice(0, 10)} (401)`);
+            await dropAccountSession(s.userId);
+            return;
+          }
+          if (!r.snapshot) return;
+          const prevStored = loadAccountSnapshot(r.snapshot.userId);
+          const hydrated = hydrateSnapshot(prevStored, r.snapshot);
+          await saveAccountSnapshot(hydrated);
+          const labelEmail = hydrated.accountLabel?.includes("@") ? hydrated.accountLabel : s.email;
+          await upsertAccountSession(s.cookieValue, labelEmail);
+        }),
+      );
+    } catch (err) {
+      log.appendLine(`[${ts}] poll#${pollId} stored sessions: ${err}`);
+    }
+  }
+
+  /**
+   * Fetch events for [from, to] (local days), REPLACE sealed buckets for those days,
+   * merge today's events only. Does not overwrite cycle aggregations/totalTokens.
+   */
+  async queryRange(from: string, to: string): Promise<boolean> {
+    await this.waitIdle();
+    const startMs = dayStartMs(from);
+    const endMs = dayEndMs(to);
+    const ts = new Date().toISOString();
+    log.appendLine(`[${ts}] queryRange ${from}..${to}`);
+    try {
+      const result = await fetchUsage({ fullEvents: true, startMs, endMs });
+      if (!result.snapshot) {
+        this._lastError = result.error;
+        this._onUpdate?.();
+        return false;
+      }
+      const fresh = result.snapshot;
+      const stored = loadAccountSnapshot(fresh.userId);
+      const prev = this._lastSnapshot?.userId === fresh.userId ? this._lastSnapshot : stored;
+      const fetched = normalizeEventTimestamps(fresh.events);
+      const applied = applyFetchedRange(
+        normalizeEventTimestamps(prev?.events ?? stored?.events ?? []),
+        prev?.dailyBuckets ?? stored?.dailyBuckets ?? [],
+        fetched,
+        from,
+        to,
+      );
+      const snapshot: UsageSnapshot = {
+        ...fresh,
+        events: applied.events,
+        eventsComplete: prev?.eventsComplete ?? stored?.eventsComplete ?? false,
+        aggregations:
+          (prev?.aggregations?.length ? prev.aggregations : stored?.aggregations) ?? fresh.aggregations,
+        totalTokens: prev?.totalTokens ?? stored?.totalTokens ?? fresh.totalTokens,
+        dailyBuckets: applied.dailyBuckets,
+        accountLabel: fresh.accountLabel || prev?.accountLabel || stored?.accountLabel,
+      };
+      this._lastSnapshot = snapshot;
+      this._lastError = null;
+      this._lastSuccessTime = new Date();
+      this._eventsError = result.eventsError;
+      this._aggError = result.aggError;
+      await saveAccountSnapshot(snapshot);
+      log.appendLine(
+        `[${ts}] queryRange ok fetched=${fetched.length} todayEvents=${snapshot.events.length} buckets=${snapshot.dailyBuckets?.length ?? 0}`,
+      );
+      this._onUpdate?.();
+      return true;
+    } catch (err) {
+      log.appendLine(`[${ts}] queryRange error: ${err}`);
+      return false;
+    }
   }
 }
 

@@ -38,6 +38,17 @@ export function addDaysIso(iso: string, n: number): string {
   return `${y}-${m}-${day}`;
 }
 
+/** Local midnight of YYYY-MM-DD. */
+export function dayStartMs(iso: string): number {
+  const parts = iso.split("-").map(Number);
+  return new Date(parts[0], parts[1] - 1, parts[2]).getTime();
+}
+
+/** Last ms of local day YYYY-MM-DD. */
+export function dayEndMs(iso: string): number {
+  return dayStartMs(addDaysIso(iso, 1)) - 1;
+}
+
 /** Window for trend date inputs: at least last 7 days when cycle start missing. */
 export function computeTrendRange(opts: {
   billingCycleStart: string;

@@ -133,7 +133,14 @@ export function snapshotRangeSlice(
   const buckets = (snapshot.dailyBuckets ?? []).filter(
     (b) => inRange(b.day, from, to) && b.day !== today,
   );
-  const events = snapshot.events.filter((e) => inRange(dayKeyFromTs(e.timestamp), from, to));
+  const bucketDays = new Set(buckets.map((b) => b.day));
+  // Past days with a bucket: use bucket only. Events fill today + days without buckets.
+  const events = snapshot.events.filter((e) => {
+    const day = dayKeyFromTs(e.timestamp);
+    if (!inRange(day, from, to)) return false;
+    if (day === today) return true;
+    return !bucketDays.has(day);
+  });
 
   const aggMap = new Map<string, ModelAgg>();
   for (const b of buckets) {
@@ -250,7 +257,7 @@ export function buildCombinedViewForRange(
     overallLimitCents,
     onDemandUsedCents,
     billingCycleNote: l10n("Billing cycles may differ per account"),
-    perAccountRows: sortCombinedAccountRows(perAccountRows, { by: "tokens" }),
+    perAccountRows: sortCombinedAccountRows(perAccountRows, { by: "tokens", preferFresh: false }),
     events,
     aggregations,
     membershipType: "combined",

@@ -73,6 +73,18 @@ describe("sortCombinedAccountRows", () => {
     );
     assert.deepEqual(sorted.map((r) => r.userId), ["b", "c", "a"]);
   });
+
+  it("token sort puts non-zero above fresh zeros", () => {
+    const sorted = sortCombinedAccountRows(
+      [
+        row({ userId: "fresh0", totalTokens: 0, isStale: false, updatedAt: "2026-01-03T00:00:00.000Z" }),
+        row({ userId: "staleBig", totalTokens: 9_000_000, isStale: true, updatedAt: "2026-01-01T00:00:00.000Z" }),
+        row({ userId: "stale0", totalTokens: 0, isStale: true, updatedAt: "2026-01-02T00:00:00.000Z" }),
+      ],
+      { by: "tokens" },
+    );
+    assert.deepEqual(sorted.map((r) => r.userId), ["staleBig", "fresh0", "stale0"]);
+  });
 });
 
 describe("mergeCombinedEvents", () => {

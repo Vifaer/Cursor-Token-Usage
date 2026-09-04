@@ -7,11 +7,16 @@ export type AccountSortBy = "updated" | "tokens";
 
 export function sortCombinedAccountRows(
   rows: CombinedAccountRow[],
-  opts?: { by?: AccountSortBy },
+  opts?: { by?: AccountSortBy; preferFresh?: boolean },
 ): CombinedAccountRow[] {
   const by = opts?.by ?? "updated";
+  // Token sort: never bury non-zero rows under fresh zeros (range overview).
+  const preferFresh = opts?.preferFresh ?? by === "updated";
   return [...rows].sort((a, b) => {
-    if (a.isStale !== b.isStale) return a.isStale ? 1 : -1;
+    if (preferFresh && a.isStale !== b.isStale) return a.isStale ? 1 : -1;
+    if (by === "tokens" && a.totalTokens !== b.totalTokens) {
+      return b.totalTokens - a.totalTokens;
+    }
     if (by === "updated") return Date.parse(b.updatedAt) - Date.parse(a.updatedAt);
     return b.totalTokens - a.totalTokens;
   });

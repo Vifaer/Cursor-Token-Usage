@@ -2,7 +2,7 @@ import * as vscode from "vscode";
 import { computeCacheStats } from "./cacheStats";
 import { mergeCombinedEvents, sortCombinedAccountRows, sumEventCostCents } from "./combinedView";
 import { mergeEvents } from "./mergeEvents";
-import { compactEvents, MAX_EVENTS_PER_ACCOUNT, shouldCompact } from "./dailyBuckets";
+import { compactEvents, MAX_EVENTS_PER_ACCOUNT, normalizeEventTimestamps, shouldCompact } from "./dailyBuckets";
 import {
   CombinedAccountRow,
   CombinedViewDto,
@@ -18,6 +18,8 @@ export { mergeCombinedEvents, sortCombinedAccountRows } from "./combinedView";
 
 const STORE_KEY = "cursorTokenUsage.accounts.v1";
 const VIEW_SCOPE_KEY = "cursorTokenUsage.viewScope.v1";
+/** One-shot: wipe additive-corrupt dailyBuckets so query/full poll can reseal cleanly. */
+const DAY_BUCKET_RESET_KEY = "cursorTokenUsage.dayBuckets.reset.v1";
 
 interface PersistedSnapshot {
   userId: string;
@@ -50,6 +52,26 @@ let globalState: vscode.Memento | undefined;
 
 export function initStore(context: vscode.ExtensionContext): void {
   globalState = context.globalState;
+}
+
+/**
+ * Clear all dailyBuckets once (schema fix for additive compact corruption).
+ * Keeps events/aggregations; next full poll or date Query reseals days correctly.
+ */
+export async function resetCorruptedDayBucketsOnce(): Promise<number> {
+  if (!globalState) return 0;
+  if (globalState.get<boolean>(DAY_BUCKET_RESET_KEY)) return 0;
+  const all = readAll();
+  let cleared = 0;
+  for (const snap of Object.values(all)) {
+    if ((snap.dailyBuckets?.length ?? 0) > 0) {
+      snap.dailyBuckets = [];
+      cleared++;
+    }
+  }
+  if (cleared > 0) await writeAll(all);
+  await globalState.update(DAY_BUCKET_RESET_KEY, true);
+  return cleared;
 }
 
 export async function saveViewScope(scope: import("./models").ViewScope, accountId?: string | null): Promise<void> {
@@ -101,7 +123,7 @@ function pruneAccounts(all: Record<string, PersistedSnapshot>): void {
 }
 
 function toPersisted(snapshot: UsageSnapshot): PersistedSnapshot {
-  let events = snapshot.events;
+  let events = normalizeEventTimestamps(snapshot.events);
   let dailyBuckets = snapshot.dailyBuckets ?? [];
   if (shouldCompact(events, dailyBuckets)) {
     const compacted = compactEvents(events, dailyBuckets);
@@ -109,6 +131,7 @@ function toPersisted(snapshot: UsageSnapshot): PersistedSnapshot {
     dailyBuckets = compacted.dailyBuckets;
   } else {
     events = events.slice(0, MAX_EVENTS_PER_ACCOUNT);
+    dailyBuckets = dailyBuckets.filter((b) => b.day >= "2020-01-01");
   }
 
   return {
@@ -161,10 +184,10 @@ function fromPersisted(p: PersistedSnapshot): UsageSnapshot {
     requestMax: p.requestMax,
     planName: p.planName || undefined,
     aggregations: p.aggregations,
-    events: p.events,
+    events: normalizeEventTimestamps(p.events),
     eventsComplete: p.eventsComplete,
     totalTokens: p.totalTokens,
-    dailyBuckets: p.dailyBuckets ?? [],
+    dailyBuckets: (p.dailyBuckets ?? []).filter((b) => b.day >= "2020-01-01"),
   };
 }
 
@@ -182,6 +205,43 @@ export async function saveAccountSnapshot(snapshot: UsageSnapshot): Promise<void
   await writeAll(all);
 }
 
+/** Drop ghost rows keyed by a stale Sentry userId after identity moved to JWT. */
+export async function removeAccountSnapshot(userId: string): Promise<void> {
+  if (!userId) return;
+  const all = readAll();
+  if (!all[userId]) return;
+  delete all[userId];
+  await writeAll(all);
+}
+
+/**
+ * Remove zero-usage rows whose userId is not the current session and whose label
+ * matches a known stale Sentry email (pre-1.3.9 mis-identity).
+ */
+export async function pruneIdentityGhosts(opts: {
+  currentUserId: string;
+  staleUserIds?: string[];
+  staleEmails?: string[];
+}): Promise<number> {
+  const all = readAll();
+  let removed = 0;
+  const staleIds = new Set((opts.staleUserIds ?? []).filter(Boolean));
+  const staleEmails = new Set((opts.staleEmails ?? []).map((e) => e.trim().toLowerCase()).filter(Boolean));
+  for (const [uid, snap] of Object.entries(all)) {
+    if (uid === opts.currentUserId) continue;
+    const label = (snap.accountLabel ?? "").trim().toLowerCase();
+    const isStaleId = staleIds.has(uid);
+    const isStaleEmail = label && staleEmails.has(label);
+    const empty = (snap.totalTokens ?? 0) === 0 && (snap.cursorModelsPercent ?? 0) === 0 && (snap.otherModelsPercent ?? 0) === 0;
+    if ((isStaleId || isStaleEmail) && empty) {
+      delete all[uid];
+      removed++;
+    }
+  }
+  if (removed > 0) await writeAll(all);
+  return removed;
+}
+
 export function loadAccountSnapshot(userId: string): UsageSnapshot | null {
   const p = readAll()[userId];
   return p ? fromPersisted(p) : null;
@@ -194,23 +254,47 @@ export function listAccountSnapshots(): UsageSnapshot[] {
 }
 
 export function hydrateSnapshot(stored: UsageSnapshot | null, fresh: UsageSnapshot): UsageSnapshot {
-  if (!stored) return fresh;
-  let events = fresh.events;
-  if (stored.eventsComplete && !fresh.eventsComplete) {
-    events = mergeEvents(stored.events, fresh.events);
-  } else if (fresh.eventsComplete) {
-    events = fresh.events;
-  } else if (stored.events.length > fresh.events.length) {
-    events = mergeEvents(stored.events, fresh.events);
+  if (!stored) {
+    if (!fresh.eventsComplete) return fresh;
+    const compacted = compactEvents(normalizeEventTimestamps(fresh.events), []);
+    return { ...fresh, events: compacted.events, dailyBuckets: compacted.dailyBuckets };
   }
+  const freshEvents = normalizeEventTimestamps(fresh.events);
+
+  // Full event dump: rebuild sealed days from scratch (replace, never add onto old buckets).
+  if (fresh.eventsComplete) {
+    const compacted = compactEvents(freshEvents, []);
+    return {
+      ...fresh,
+      events: compacted.events,
+      dailyBuckets: compacted.dailyBuckets,
+      eventsComplete: true,
+      aggregations: fresh.aggregations.length > 0 ? fresh.aggregations : stored.aggregations,
+      totalTokens: fresh.totalTokens ?? stored.totalTokens,
+      accountLabel: fresh.accountLabel || stored.accountLabel,
+    };
+  }
+
+  let events = freshEvents;
+  if (stored.eventsComplete) {
+    events = mergeEvents(normalizeEventTimestamps(stored.events), events);
+  } else if (stored.events.length > fresh.events.length) {
+    events = mergeEvents(normalizeEventTimestamps(stored.events), events);
+  }
+  // Prefer sealed buckets from store; compact on save skips those days (no double-count).
+  const dailyBuckets = stored.dailyBuckets?.length
+    ? stored.dailyBuckets
+    : fresh.dailyBuckets?.length
+      ? fresh.dailyBuckets
+      : [];
   return {
     ...fresh,
     events,
-    eventsComplete: fresh.eventsComplete || stored.eventsComplete,
+    eventsComplete: stored.eventsComplete,
     aggregations: fresh.aggregations.length > 0 ? fresh.aggregations : stored.aggregations,
     totalTokens: fresh.totalTokens ?? stored.totalTokens,
     accountLabel: fresh.accountLabel || stored.accountLabel,
-    dailyBuckets: fresh.dailyBuckets?.length ? fresh.dailyBuckets : stored.dailyBuckets,
+    dailyBuckets,
   };
 }
 

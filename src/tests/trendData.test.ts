@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { buildTrendPoints, computeTrendRange, sumUsageCostCents } from "../trendData";
+import { buildTrendPoints, computeTrendRange, dayEndMs, dayStartMs, sumUsageCostCents } from "../trendData";
 import { DailyBucket, UsageEvent } from "../models";
 
 function ev(dayMs: number, cents = 0): UsageEvent {
@@ -90,5 +90,16 @@ describe("sumUsageCostCents", () => {
       },
     ];
     assert.equal(sumUsageCostCents([ev(1, 95)], buckets), 295);
+  });
+});
+
+describe("dayStartMs / dayEndMs", () => {
+  it("covers a full local calendar day", () => {
+    const start = dayStartMs("2026-08-31");
+    const end = dayEndMs("2026-08-31");
+    assert.equal(new Date(start).getHours(), 0);
+    assert.equal(new Date(start).getMinutes(), 0);
+    assert.ok(end > start);
+    assert.equal(end - start, 24 * 60 * 60 * 1000 - 1);
   });
 });

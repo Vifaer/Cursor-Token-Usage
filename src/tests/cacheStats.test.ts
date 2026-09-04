@@ -18,12 +18,12 @@ describe("computeCacheStatsFromAggs", () => {
     assert.equal(stats.outputTokens, 100);
   });
 
-  it("computes hitRate as cacheRead / (cacheRead + input)", () => {
+  it("computes hitRate as cacheRead / (input + cacheRead + cacheWrite)", () => {
     const stats = computeCacheStatsFromAggs([
       { model: "m", inputTokens: 100, outputTokens: 50, cacheWriteTokens: 20, cacheReadTokens: 300, totalTokens: 470 },
     ]);
-    assert.equal(stats.hitRate, 300 / 400);
-    assert.equal(formatHitRate(stats.hitRate), "75%");
+    assert.equal(stats.hitRate, 300 / 420);
+    assert.equal(formatHitRate(stats.hitRate), "71%");
     assert.equal(stats.cacheShare, (300 + 20) / 470);
   });
 

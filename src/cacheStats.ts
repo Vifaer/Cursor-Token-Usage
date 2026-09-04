@@ -6,7 +6,7 @@ export interface CacheStats {
   cacheReadTokens: number;
   cacheWriteTokens: number;
   totalTokens: number;
-  /** cacheRead / (cacheRead + input); null when denominator is 0 */
+  /** cacheRead / (input + cacheRead + cacheWrite); null when denominator is 0 */
   hitRate: number | null;
   /** (cacheRead + cacheWrite) / totalTokens */
   cacheShare: number | null;
@@ -24,7 +24,8 @@ const EMPTY: CacheStats = {
 
 function finalize(input: number, output: number, cacheRead: number, cacheWrite: number): CacheStats {
   const totalTokens = input + output + cacheRead + cacheWrite;
-  const denom = cacheRead + input;
+  // OpenUsage / Anthropic Console: share of prompt tokens served from cache
+  const denom = input + cacheRead + cacheWrite;
   return {
     inputTokens: input,
     outputTokens: output,

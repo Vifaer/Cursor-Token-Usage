@@ -66,6 +66,8 @@ export interface FetchResult {
   error: string | null;
   eventsError: boolean;
   aggError: boolean;
+  /** Explicit/stored session got 401 (caller should drop that cookie). */
+  authError?: boolean;
 }
 
 export interface UsageAlert {

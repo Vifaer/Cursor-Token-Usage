@@ -3,6 +3,9 @@ import * as path from "path";
 import * as vscode from "vscode";
 import { execFile } from "child_process";
 import { AccountIdentity, SessionInfo } from "./models";
+import { extractUserId, parseSessionCookie, userIdFromJwt } from "./jwtSession";
+
+export { jwtExpMs, parseSessionCookie, userIdFromJwt } from "./jwtSession";
 
 type SqlJsInit = (config?: { locateFile?: (file: string) => string }) => Promise<{
   Database: new (data?: ArrayLike<number> | Buffer | null) => {
@@ -151,6 +154,13 @@ async function queryDb(dbPath: string, key: string): Promise<string | null> {
   return queryDbPython(dbPath, key);
 }
 
+/** Read a raw ItemTable value from Cursor state.vscdb (e.g. other extension globalState). */
+export async function readStateDbValue(key: string): Promise<string | null> {
+  const dbPath = getDbPath();
+  if (!fs.existsSync(dbPath)) return null;
+  return queryDb(dbPath, key);
+}
+
 function getStoragePaths(): string[] {
   const home = process.env.HOME || process.env.USERPROFILE || "";
   const base =
@@ -188,15 +198,6 @@ async function findUserIdInFile(filePath: string): Promise<string | null> {
   return match ? extractUserId(match[0]) : null;
 }
 
-function extractUserId(oauthId: string): string | null {
-  if (!oauthId) return null;
-  if (oauthId.includes("|")) {
-    const part = oauthId.split("|").find((p) => p.startsWith("user_"));
-    if (part) return part;
-  }
-  return oauthId.startsWith("user_") ? oauthId : null;
-}
-
 function extractEmail(value: unknown): string | undefined {
   if (typeof value !== "string") return undefined;
   const v = value.trim();
@@ -231,6 +232,11 @@ async function readIdentityFromFiles(): Promise<Partial<AccountIdentity>> {
   return out;
 }
 
+/** Sentry/storage-only identity (may be stale). Used to prune mislabeled ghost rows. */
+export async function readFileIdentityHints(): Promise<Partial<AccountIdentity>> {
+  return readIdentityFromFiles();
+}
+
 async function readFreshUserId(): Promise<string | null> {
   for (const p of getStoragePaths()) {
     try {
@@ -258,35 +264,62 @@ async function readFreshAccessToken(): Promise<string | null> {
   return queryDb(dbPath, "cursorAuth/accessToken");
 }
 
-/** Resolve human-readable identity: email > displayName. */
+/** Resolve identity: email from DB first; userId from JWT then DB then files. */
 export async function readAccountIdentity(): Promise<AccountIdentity | null> {
   const fromFiles = await readIdentityFromFiles();
   const dbPath = getDbPath();
-  let email = fromFiles.email;
+  let email: string | undefined;
   let displayName = fromFiles.displayName;
-  let userId = fromFiles.userId ?? null;
 
   if (fs.existsSync(dbPath)) {
-    if (!email) email = extractEmail(await queryDb(dbPath, "cursorAuth/cachedEmail"));
-    if (!userId) {
-      const raw = await queryDb(dbPath, "cursorAuth/cachedSignUpId");
-      userId = raw ? extractUserId(raw) : null;
+    email = extractEmail(await queryDb(dbPath, "cursorAuth/cachedEmail"));
+    if (!displayName) {
+      const profileRaw = await queryDb(dbPath, "cursorAuth/cachedScopedProfile");
+      if (profileRaw) {
+        try {
+          const profile = JSON.parse(profileRaw) as { displayName?: unknown };
+          displayName = extractDisplayName(profile.displayName);
+        } catch {
+          /* ignore */
+        }
+      }
     }
   }
+  if (!email) email = fromFiles.email;
+
+  const accessToken = await readFreshAccessToken();
+  let userId = accessToken ? userIdFromJwt(accessToken) : null;
+  if (!userId && fs.existsSync(dbPath)) {
+    userId =
+      extractUserId((await queryDb(dbPath, "cursorAuth/userId")) ?? "") ??
+      extractUserId((await queryDb(dbPath, "cursorAuth/cachedSignUpId")) ?? "");
+  }
+  if (!userId) userId = fromFiles.userId ?? null;
   if (!userId) userId = await readFreshUserId();
   if (!userId) return null;
   return { userId, email, displayName };
 }
 
+async function resolveDiskUserId(accessToken: string): Promise<string | null> {
+  const fromJwt = userIdFromJwt(accessToken);
+  if (fromJwt) return fromJwt;
+  const dbPath = getDbPath();
+  if (fs.existsSync(dbPath)) {
+    const fromDb =
+      extractUserId((await queryDb(dbPath, "cursorAuth/userId")) ?? "") ??
+      extractUserId((await queryDb(dbPath, "cursorAuth/cachedSignUpId")) ?? "");
+    if (fromDb) return fromDb;
+  }
+  return readFreshUserId();
+}
+
 /**
  * Hot path: return cached session within USER_ID_TTL_MS without touching DB.
- * Cold path: re-read userId; only re-read accessToken when userId changes.
+ * Cookie userId comes from JWT sub (not Sentry).
  */
 export async function getSession(manualToken?: string): Promise<SessionInfo | null> {
   if (manualToken) {
-    const manualUserId = manualToken.split("%3A%3A")[0];
-    if (!/^user_[a-zA-Z0-9]{20,}$/.test(manualUserId)) return null;
-    return { userId: manualUserId, accessToken: manualToken.split("%3A%3A")[1] ?? "", cookieValue: manualToken };
+    return parseSessionCookie(manualToken);
   }
 
   const now = Date.now();
@@ -294,21 +327,24 @@ export async function getSession(manualToken?: string): Promise<SessionInfo | nu
     return lastSession;
   }
 
-  const userId = await readFreshUserId();
+  const accessToken = await readFreshAccessToken();
+  if (!accessToken) {
+    clearCachedToken();
+    return null;
+  }
+
+  const userId = await resolveDiskUserId(accessToken);
   if (!userId) {
     clearCachedToken();
     return null;
   }
 
-  if (lastSession && lastSessionUserId === userId) {
+  if (lastSession && lastSessionUserId === userId && lastSession.accessToken === accessToken) {
     lastUserIdCheckAt = now;
     return lastSession;
   }
 
   clearCachedToken();
-  const accessToken = await readFreshAccessToken();
-  if (!accessToken) return null;
-
   const cookieValue = `${userId}%3A%3A${accessToken}`;
   lastSession = { userId, accessToken, cookieValue };
   lastSessionUserId = userId;
@@ -339,9 +375,23 @@ export async function runDiagnoseAuth(manualToken?: string): Promise<string[]> {
   }
 
   const identity = await readAccountIdentity();
-  lines.push(`UserId: ${identity?.userId ?? "(none)"}`);
-  lines.push(`Email: ${identity?.email ?? "(none)"}`);
+  const accessToken = manualToken
+    ? parseSessionCookie(manualToken)?.accessToken
+    : await readFreshAccessToken();
+  const jwtUid = accessToken ? userIdFromJwt(accessToken) : null;
+  const dbUserId = fs.existsSync(dbPath)
+    ? extractUserId((await queryDb(dbPath, "cursorAuth/userId")) ?? "")
+    : null;
+  const sentryUid = await readFreshUserId();
+  const session = await getSession(manualToken);
+  lines.push(`Adopted userId: ${session?.userId ?? identity?.userId ?? "(none)"}`);
+  lines.push(`Adopted email: ${identity?.email ?? "(none)"}`);
   lines.push(`DisplayName: ${identity?.displayName ?? "(none)"}`);
+  lines.push(`JWT sub userId: ${jwtUid ?? "(none)"}`);
+  lines.push(`cursorAuth/userId: ${dbUserId ?? "(none)"}`);
+  lines.push(`Sentry/files userId: ${sentryUid ?? "(none)"}`);
+  lines.push(`cachedEmail: ${(fs.existsSync(dbPath) && (await queryDb(dbPath, "cursorAuth/cachedEmail"))) || "(none)"}`);
+  lines.push(`Cookie source: ${manualToken ? "manual" : session ? "disk-jwt" : "(none)"}`);
 
   if (manualToken) {
     lines.push(`Access token: manual`);

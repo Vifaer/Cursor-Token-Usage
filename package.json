@@ -2,7 +2,7 @@
   "name": "cursor-token-usage",
   "displayName": "%displayName%",
   "description": "%description%",
-  "version": "1.3.8",
+  "version": "1.3.14",
   "publisher": "vifaer",
   "license": "MIT",
   "icon": "icon.png",
@@ -34,7 +34,8 @@
       { "command": "cursor-token-usage.diagnoseAuth", "title": "%cmd.diagnoseAuth%" },
       { "command": "cursor-token-usage.switchAccountView", "title": "%cmd.switchAccountView%" },
       { "command": "cursor-token-usage.toggleStatusBarDataSource", "title": "%cmd.toggleStatusBarDataSource%" },
-      { "command": "cursor-token-usage.exportUsage", "title": "%cmd.exportUsage%" }
+      { "command": "cursor-token-usage.exportUsage", "title": "%cmd.exportUsage%" },
+      { "command": "cursor-token-usage.importLegacyAccounts", "title": "%cmd.importLegacyAccounts%" }
     ],
     "configuration": {
       "title": "%config.title%",

@@ -39,6 +39,7 @@ Cursor 已改为按 token、双池计费（不再是旧的「fast-premium 请求
 - **v1.3.3：** 状态栏去掉多余「用量」前缀；费用格优先套餐用量；缓存写入字段级 hybrid；零值 Cache Write / On-Demand $0 隐藏
 - **v1.3.4：** 状态栏默认当前账号；合并 Auto/Default 重复「标准」；趋势接入 dailyBuckets 且默认近 7 日；meter/hero 去重与文案修正
 - **v1.3.5：** 状态栏一键切换 **当前账号** / **总览**；悬停 tooltip 可点切换；详情面板工具栏 + ⋯ 菜单；命令面板：切换状态栏当前/总览
+- **v1.3.9：** 身份以 JWT `sub` + `cachedEmail` 为准（修复 Sentry 误标）；曾登录账号的 session 可并行刷新总览
 
 ## 快速开始
 
@@ -52,7 +53,7 @@ cursor --install-extension vifaer.cursor-token-usage
 
 ### 从 VSIX 安装
 
-1. 从 [Releases](https://github.com/Vifaer/Cursor-Token-Usage/releases) 下载 `cursor-token-usage-1.3.7.vsix`
+1. 从 [Releases](https://github.com/Vifaer/Cursor-Token-Usage/releases) 下载 `cursor-token-usage-1.3.9.vsix`
 2. 拖进 Cursor，或 `Cmd+Shift+P`（Windows：`Ctrl+Shift+P`）→ `Extensions: Install from VSIX...`
 3. 执行 `Developer: Reload Window`
 
@@ -161,6 +162,10 @@ cursor --install-extension vifaer.cursor-token-usage
 
 先确认本机已登录 Cursor，PATH 上有 Python 3。仍失败就用 **Set Session Token** 粘贴 `WorkosCursorSessionToken`。
 
+**账号显示成旧邮箱 / hotmail 统计不到？**
+
+扩展以 `state.vscdb` 的 `cachedEmail` + JWT `sub` 识别当前账号（不再优先 Sentry）。命令面板运行 **Diagnose Auth** 可对照 JWT / DB / Sentry。曾登录或粘贴过的其它账号，会按保留的 session 在总览里并行刷新（同一 JWT 不会造出假双账号）；过期后需再登录或重新 Set Token。
+
 **远程 SSH / WSL 读不到用量？**
 
 扩展必须装在**本机** Cursor，不要装到远端。它是 UI 扩展，只读本机 `state.vscdb`。
@@ -266,6 +271,7 @@ Cursor now bills by tokens in two pools (not the old “fast-premium requests + 
 - **v1.3.3:** Status bar drops redundant「用量」prefix; smart cost pill (pool usage first); field-level cache Write hybrid; hide zero Cache Write / On-Demand $0
 - **v1.3.4:** Status bar default = current account; merge Auto/Default duplicate modes; trend uses dailyBuckets + ≥7-day window; meter/hero cleanup
 - **v1.3.5:** Quick toggle status bar between **current account** and **overview**; tooltip switch link; details panel toolbar + ⋯ menu; Command Palette toggle
+- **v1.3.9:** Identity from JWT `sub` + `cachedEmail` (fixes Sentry mislabel); retained sessions refresh in overview in parallel
 
 ### Quick Start
 
@@ -279,7 +285,7 @@ cursor --install-extension vifaer.cursor-token-usage
 
 #### From a VSIX
 
-1. Download `cursor-token-usage-1.3.7.vsix` from [Releases](https://github.com/Vifaer/Cursor-Token-Usage/releases)
+1. Download `cursor-token-usage-1.3.9.vsix` from [Releases](https://github.com/Vifaer/Cursor-Token-Usage/releases)
 2. Drag it into Cursor, or `Cmd+Shift+P` (Windows: `Ctrl+Shift+P`) → `Extensions: Install from VSIX...`
 3. Run `Developer: Reload Window`
 
@@ -387,6 +393,10 @@ Self-serve usage events often return `$0` (`chargedCents: 0`) even when tokens w
 **Status bar stuck on Set Token?**
 
 Confirm Cursor is signed in locally and Python 3 is on PATH. If it still fails, use **Set Session Token** and paste `WorkosCursorSessionToken`.
+
+**Wrong email / hotmail not showing?**
+
+Identity uses `cachedEmail` + JWT `sub` from `state.vscdb` (not Sentry). Run **Diagnose Auth** to compare JWT / DB / Sentry. Other accounts you previously signed into (or pasted) are refreshed in the overview from retained sessions (same JWT never counts as two accounts); re-login or Set Token after expiry.
 
 **No usage on SSH / WSL?**
 

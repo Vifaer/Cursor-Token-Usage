@@ -5,9 +5,11 @@
 import * as fs from "fs";
 import * as path from "path";
 import * as vscode from "vscode";
-import { initStore, listAccountSnapshots } from "./accountStore";
+import { initStore, listAccountSnapshots, pruneIdentityGhosts, resetCorruptedDayBucketsOnce } from "./accountStore";
+import { initAccountSessions } from "./accountSessions";
 import { deleteSecretToken, getSecretToken, initSecretStorage, storeSecretToken } from "./api";
-import { runDiagnoseAuth, setExtensionPath } from "./credentials";
+import { getSession, readFileIdentityHints, runDiagnoseAuth, setExtensionPath } from "./credentials";
+import { importLegacyAccountStores, resetLegacyImportFlag } from "./migrateLegacyStore";
 import { CombinedViewDto, UsageAlert, UsageSnapshot, isCombinedView } from "./models";
 import { UsagePanel } from "./panel";
 import { resolveStatsRange } from "./dayStats";
@@ -24,11 +26,44 @@ let suppressStale = false;
 
 export function activate(context: vscode.ExtensionContext): void {
   initSecretStorage(context.secrets);
+  initAccountSessions(context.secrets);
   initStore(context);
   setExtensionPath(context.extensionPath);
   extensionContext = context;
   tracker = new UsageTracker();
-  tracker.hydrateFromStore();
+
+  void (async () => {
+    try {
+      const clearedBuckets = await resetCorruptedDayBucketsOnce();
+      if (clearedBuckets > 0) {
+        vscode.window.setStatusBarMessage(
+          vscode.l10n.t("Cleared corrupted day stats for {0} accounts — use Query or Refresh", clearedBuckets),
+          8000,
+        );
+      }
+      const migrated = await importLegacyAccountStores(context.globalState);
+      if (migrated.imported > 0) {
+        vscode.window.setStatusBarMessage(
+          vscode.l10n.t("Restored {0} accounts from legacy store ({1} total)", migrated.imported, migrated.totalAccounts),
+          5000,
+        );
+      }
+      const session = await getSession();
+      if (session) {
+        const hints = await readFileIdentityHints();
+        await pruneIdentityGhosts({
+          currentUserId: session.userId,
+          staleUserIds: hints.userId ? [hints.userId] : [],
+          staleEmails: hints.email ? [hints.email] : [],
+        });
+      }
+    } catch {
+      /* ignore */
+    }
+    tracker.hydrateFromStore();
+    updateStatusBar();
+    UsagePanel.current?.refresh();
+  })();
 
   recreateStatusBar();
 
@@ -49,6 +84,7 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand("cursor-token-usage.switchAccountView", switchAccountView),
     vscode.commands.registerCommand("cursor-token-usage.toggleStatusBarDataSource", toggleStatusBarDataSource),
     vscode.commands.registerCommand("cursor-token-usage.exportUsage", exportUsage),
+    vscode.commands.registerCommand("cursor-token-usage.importLegacyAccounts", importLegacyAccounts),
     vscode.window.onDidChangeWindowState((state) => {
       windowFocused = state.focused;
       startPolling();
@@ -201,6 +237,16 @@ function showDetails(): void {
         UsagePanel.current?.refresh();
         updateStatusBar();
       }
+      if (command === "queryStatsRange" && payload?.range?.from && payload.range.to) {
+        void (async () => {
+          const ok = await tracker.queryRange(payload.range!.from!, payload.range!.to!);
+          UsagePanel.current?.refresh();
+          updateStatusBar();
+          if (!ok && tracker.lastError) {
+            void vscode.window.showWarningMessage(tracker.lastError);
+          }
+        })();
+      }
     },
   );
   const ageMs = tracker.lastSuccessTime ? Date.now() - tracker.lastSuccessTime.getTime() : Infinity;
@@ -330,6 +376,18 @@ async function diagnoseAuth(): Promise<void> {
   ch.appendLine("=== Cursor Token Usage: Diagnose Auth ===");
   for (const line of lines) ch.appendLine(line);
   ch.show(true);
+}
+
+async function importLegacyAccounts(): Promise<void> {
+  await resetLegacyImportFlag(extensionContext.globalState);
+  const result = await importLegacyAccountStores(extensionContext.globalState, { force: true });
+  tracker.hydrateFromStore();
+  updateStatusBar();
+  UsagePanel.current?.refresh();
+  const src = result.sources.length ? result.sources.join(", ") : vscode.l10n.t("(none found)");
+  vscode.window.showInformationMessage(
+    vscode.l10n.t("Legacy import: +{0} updated, {1} unchanged, {2} accounts total. Sources: {3}", result.imported, result.skipped, result.totalAccounts, src),
+  );
 }
 
 async function toggleStatusBarDataSource(): Promise<void> {

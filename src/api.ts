@@ -1,7 +1,8 @@
 import * as https from "https";
 import * as vscode from "vscode";
-import { clearCachedToken, getSession, invalidateSession, readAccountIdentity } from "./credentials";
-import { FetchResult, ModelAgg, UsageEvent, UsageSnapshot, identityToLabel } from "./models";
+import { upsertAccountSession } from "./accountSessions";
+import { getSession, invalidateSession, parseSessionCookie, readAccountIdentity } from "./credentials";
+import { FetchResult, ModelAgg, SessionInfo, UsageEvent, UsageSnapshot, identityToLabel } from "./models";
 
 const outputChannel = vscode.window.createOutputChannel("Cursor Token Usage");
 const SECRET_KEY = "cursorTokenUsage.sessionToken";
@@ -12,6 +13,8 @@ const LEGACY_CACHE_TTL_MS = 5_000;
 
 let secretStorage: vscode.SecretStorage | null = null;
 let autoTokenFailed = false;
+/** Set when the latest cookie request saw HTTP 401 (before optional retry). */
+let lastCookieAuthFailed = false;
 let legacyCache: { token: string; at: number; data: { numRequests: number; maxRequestUsage: number } | null } | null = null;
 
 export function initSecretStorage(storage: vscode.SecretStorage): void {
@@ -23,7 +26,10 @@ export async function getSecretToken(): Promise<string | undefined> {
 }
 
 export async function storeSecretToken(token: string): Promise<void> {
-  await secretStorage?.store(SECRET_KEY, token);
+  const parsed = parseSessionCookie(token);
+  const normalized = parsed?.cookieValue ?? token;
+  await secretStorage?.store(SECRET_KEY, normalized);
+  if (parsed) await upsertAccountSession(parsed.cookieValue);
 }
 
 export async function deleteSecretToken(): Promise<void> {
@@ -34,7 +40,7 @@ function log(msg: string): void {
   outputChannel.appendLine(`[${new Date().toLocaleTimeString()}] ${msg}`);
 }
 
-async function getSessionToken(): Promise<{ userId: string; cookieValue: string; accessToken: string } | null> {
+async function getSessionToken(): Promise<SessionInfo | null> {
   if (!autoTokenFailed) {
     const session = await getSession();
     if (session && COOKIE_SAFE_RE.test(session.cookieValue)) {
@@ -53,44 +59,84 @@ async function getSessionToken(): Promise<{ userId: string; cookieValue: string;
   }
   const manualToken = await getSecretToken();
   if (manualToken) {
-    if (!COOKIE_SAFE_RE.test(manualToken)) {
+    const parsed = parseSessionCookie(manualToken);
+    if (!parsed || !COOKIE_SAFE_RE.test(parsed.cookieValue)) {
       autoTokenFailed = false;
       return null;
     }
     autoTokenFailed = false;
-    const manualUserId = manualToken.split("%3A%3A")[0];
-    if (!/^user_[a-zA-Z0-9]{20,}$/.test(manualUserId)) return null;
-    log(`token 来源: 手动 (${manualUserId.slice(0, 10)}...)`);
-    return {
-      userId: manualUserId,
-      cookieValue: manualToken,
-      accessToken: manualToken.split("%3A%3A")[1] ?? "",
-    };
+    log(`token 来源: 手动 (${parsed.userId.slice(0, 10)}...)`);
+    return parsed;
   }
   autoTokenFailed = false;
   log("无法获取 Session Token");
   return null;
 }
 
-export async function fetchUsage(fullEvents = false, signal?: AbortSignal): Promise<FetchResult> {
-  if (signal?.aborted) {
+export type FetchUsageOpts = {
+  fullEvents?: boolean;
+  signal?: AbortSignal;
+  session?: SessionInfo;
+  accountLabel?: string;
+  /** Primary poll may flip disk auth flags; secondary must not. Default true. */
+  primary?: boolean;
+  /** Inclusive window for aggregations/events; default billing cycle → now. */
+  startMs?: number;
+  endMs?: number;
+};
+
+export async function fetchUsage(
+  fullEventsOrOpts: boolean | FetchUsageOpts = false,
+  signal?: AbortSignal,
+): Promise<FetchResult> {
+  const opts: FetchUsageOpts =
+    typeof fullEventsOrOpts === "boolean"
+      ? { fullEvents: fullEventsOrOpts, signal, primary: true }
+      : { primary: true, ...fullEventsOrOpts };
+  const fullEvents = !!opts.fullEvents;
+  const abort = opts.signal;
+  const isPrimary = opts.primary !== false;
+
+  if (abort?.aborted) {
     return { snapshot: null, error: "aborted", eventsError: false, aggError: false };
   }
-  const session = await getSessionToken();
+
+  const session = opts.session ?? (await getSessionToken());
   if (!session) {
     return { snapshot: null, error: vscode.l10n.t("Unable to get Session Token"), eventsError: false, aggError: false };
   }
 
   let partialData = false;
-  let summary = await httpGet("https://cursor.com/api/usage-summary", session.cookieValue, signal);
+  lastCookieAuthFailed = false;
+  let summary = await httpGet(
+    "https://cursor.com/api/usage-summary",
+    session.cookieValue,
+    abort,
+    isPrimary,
+  );
   if (!summary) {
-    if (signal?.aborted) {
+    if (abort?.aborted) {
       return { snapshot: null, error: "aborted", eventsError: false, aggError: false };
     }
+    if (!isPrimary && lastCookieAuthFailed) {
+      return {
+        snapshot: null,
+        error: vscode.l10n.t("Failed to fetch usage-summary"),
+        eventsError: false,
+        aggError: false,
+        authError: true,
+      };
+    }
     log("主路径 usage-summary 失败，尝试 api2 回退");
-    const fallback = await fetchFallbackSummary(session, signal);
+    const fallback = await fetchFallbackSummary(session, abort);
     if (!fallback) {
-      return { snapshot: null, error: vscode.l10n.t("Failed to fetch usage-summary"), eventsError: false, aggError: false };
+      return {
+        snapshot: null,
+        error: vscode.l10n.t("Failed to fetch usage-summary"),
+        eventsError: false,
+        aggError: false,
+        authError: !isPrimary && lastCookieAuthFailed,
+      };
     }
     summary = fallback.summary;
     partialData = fallback.partialData;
@@ -102,7 +148,7 @@ export async function fetchUsage(fullEvents = false, signal?: AbortSignal): Prom
     parsed.requestMax <= 0 ||
     /enterprise|team/i.test(parsed.membershipType);
   if (needsLegacy) {
-    const legacy = await fetchLegacyUsage(session.accessToken, signal);
+    const legacy = await fetchLegacyUsage(session.accessToken, abort);
     if (legacy && legacy.maxRequestUsage > 0) {
       parsed.requestUsed = legacy.numRequests;
       parsed.requestMax = legacy.maxRequestUsage;
@@ -110,18 +156,30 @@ export async function fetchUsage(fullEvents = false, signal?: AbortSignal): Prom
     }
   }
 
-  const startMs = parsed.billingCycleStart
-    ? Date.parse(parsed.billingCycleStart)
-    : Date.now() - 30 * 24 * 60 * 60 * 1000;
-  const endMs = Date.now();
+  const startMs =
+    opts.startMs ??
+    (parsed.billingCycleStart
+      ? Date.parse(parsed.billingCycleStart)
+      : Date.now() - 30 * 24 * 60 * 60 * 1000);
+  const endMs = opts.endMs ?? Date.now();
+
+  const identityPromise = isPrimary
+    ? readAccountIdentity()
+    : Promise.resolve(
+        opts.accountLabel?.includes("@")
+          ? { userId: session.userId, email: opts.accountLabel }
+          : opts.accountLabel
+            ? { userId: session.userId, displayName: opts.accountLabel }
+            : null,
+      );
 
   const [aggResult, eventsResult, identity] = await Promise.all([
-    fetchAggregations(session.cookieValue, startMs, endMs, signal),
-    fetchUsageEvents(session.cookieValue, startMs, endMs, fullEvents ? EVENT_MAX_PAGES : 1, signal),
-    readAccountIdentity(),
+    fetchAggregations(session.cookieValue, startMs, endMs, abort, isPrimary),
+    fetchUsageEvents(session.cookieValue, startMs, endMs, fullEvents ? EVENT_MAX_PAGES : 1, abort, isPrimary),
+    identityPromise,
   ]);
 
-  if (signal?.aborted) {
+  if (abort?.aborted) {
     return { snapshot: null, error: "aborted", eventsError: false, aggError: false };
   }
 
@@ -310,12 +368,13 @@ async function fetchAggregations(
   startMs: number,
   endMs: number,
   signal?: AbortSignal,
+  retryOnAuth = true,
 ): Promise<{ aggs: ModelAgg[]; error: boolean }> {
   const data = await httpPost(
     "https://cursor.com/api/dashboard/get-aggregated-usage-events",
     { teamId: -1, startDate: startMs, endDate: endMs },
     cookieValue,
-    true,
+    retryOnAuth,
     signal,
   );
   const rows = data?.aggregations;
@@ -352,8 +411,9 @@ function mapUsageEvent(e: unknown): UsageEvent {
   const output = toInt(tok.outputTokens);
   const cacheWrite = toInt(tok.cacheWriteTokens);
   const cacheRead = toInt(tok.cacheReadTokens);
+  const rawTs = toInt(row.timestamp);
   return {
-    timestamp: toInt(row.timestamp),
+    timestamp: rawTs > 0 && rawTs < 1e12 ? rawTs * 1000 : rawTs,
     model: String(row.model || "unknown"),
     kind: String(row.kind || ""),
     inputTokens: input,
@@ -371,6 +431,7 @@ async function fetchUsageEvents(
   endMs: number,
   maxPages = EVENT_MAX_PAGES,
   signal?: AbortSignal,
+  retryOnAuth = true,
 ): Promise<{ events: UsageEvent[]; error: boolean }> {
   const pageSize = EVENT_PAGE_SIZE;
   const events: UsageEvent[] = [];
@@ -384,7 +445,7 @@ async function fetchUsageEvents(
       "https://cursor.com/api/dashboard/get-filtered-usage-events",
       { startDate: startMs, endDate: endMs, page, pageSize },
       cookieValue,
-      true,
+      retryOnAuth,
       signal,
     );
     const rows = data?.usageEventsDisplay;
@@ -599,13 +660,18 @@ function handleResponse(
   req.setTimeout(30000);
   if (res.statusCode === 401) {
     res.resume();
+    lastCookieAuthFailed = true;
     log(`${method} ${url} → 401，清除缓存并重试`);
-    invalidateSession();
-    autoTokenFailed = true;
-    if (retryOnAuth && !signal?.aborted) {
-      retryRequest(method, url, body, signal).then(safeResolve);
+    if (retryOnAuth) {
+      invalidateSession();
+      autoTokenFailed = true;
+      if (!signal?.aborted) {
+        retryRequest(method, url, body, signal).then(safeResolve);
+      } else {
+        autoTokenFailed = false;
+        safeResolve(null);
+      }
     } else {
-      autoTokenFailed = false;
       safeResolve(null);
     }
     return;
