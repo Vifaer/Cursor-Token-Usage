@@ -101,7 +101,10 @@ export interface CombinedAccountRow {
   cacheReadTokens: number;
   cacheWriteTokens: number;
   isStale: boolean;
+  isCurrent: boolean;
   updatedAt: string;
+  /** Latest billed usage ISO time; null when no events/buckets. */
+  lastActivityAt: string | null;
 }
 
 export interface CombinedViewDto {

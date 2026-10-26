@@ -1,5 +1,10 @@
 import { computeCacheStatsFromAggs, computeCacheStatsFromEvents } from "./cacheStats";
-import { mergeCombinedEvents, sortCombinedAccountRows } from "./combinedView";
+import {
+  buildPerAccountRow,
+  mergeCombinedEvents,
+  sortCombinedAccountRows,
+  staleThresholdFromPollingInterval,
+} from "./combinedView";
 import { todayLocal } from "./dailyBuckets";
 import {
   CombinedViewDto,
@@ -9,7 +14,6 @@ import {
   StatsRange,
   UsageEvent,
   UsageSnapshot,
-  accountLabelFor,
   isCombinedView,
 } from "./models";
 import { addDaysIso, dayKeyFromTs, sumUsageCostCents } from "./trendData";
@@ -73,7 +77,7 @@ function staleThresholdMs(): number {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const vscode = require("vscode") as typeof import("vscode");
     const seconds = vscode.workspace.getConfiguration("cursorTokenUsage").get<number>("pollingInterval", 30);
-    return Math.max(5, seconds) * 3 * 1000;
+    return staleThresholdFromPollingInterval(seconds);
   } catch {
     return 90_000;
   }
@@ -92,11 +96,6 @@ function l10n(key: string, ...args: (string | number)[]): string {
     });
     return out;
   }
-}
-
-function isAccountStale(updatedAt: string, currentUserId?: string, accountUserId?: string): boolean {
-  if (accountUserId && currentUserId && accountUserId === currentUserId) return false;
-  return Date.now() - Date.parse(updatedAt) > staleThresholdMs();
 }
 
 export function resolveStatsRange(range: StatsRange, nowMs = Date.now()): StatsRange & { from: string; to: string } {
@@ -196,27 +195,20 @@ export function buildCombinedViewForRange(
   if (accounts.length === 0) return null;
 
   const slices = accounts.map((a) => ({ account: a, slice: snapshotRangeSlice(a, from, to) }));
+  const staleMs = staleThresholdMs();
 
-  const perAccountRows = slices.map(({ account, slice }) => {
-    const updatedAt = account.timestamp.toISOString();
-    return {
-      userId: account.userId,
-      label: accountLabelFor(account.userId, account.accountLabel),
-      membershipType: account.membershipType,
-      totalTokens: slice.totalTokens,
-      cursorModelsPercent: account.cursorModelsPercent,
-      otherModelsPercent: account.otherModelsPercent,
-      overallUsedCents: account.overallUsedCents,
-      overallLimitCents: account.overallLimitCents,
-      requestUsed: account.requestUsed ?? null,
-      requestMax: account.requestMax ?? null,
-      cacheHitRate: slice.cacheHitRate,
-      cacheReadTokens: slice.cacheReadTokens,
-      cacheWriteTokens: slice.cacheWriteTokens,
-      isStale: isAccountStale(updatedAt, currentUserId, account.userId),
-      updatedAt,
-    };
-  });
+  const perAccountRows = slices.map(({ account, slice }) =>
+    buildPerAccountRow(
+      account,
+      {
+        totalTokens: slice.totalTokens,
+        cacheHitRate: slice.cacheHitRate,
+        cacheReadTokens: slice.cacheReadTokens,
+        cacheWriteTokens: slice.cacheWriteTokens,
+      },
+      { currentUserId, staleMs },
+    ),
+  );
 
   let totalTokens = 0;
   let overallUsedCents: number | null = null;
@@ -257,7 +249,7 @@ export function buildCombinedViewForRange(
     overallLimitCents,
     onDemandUsedCents,
     billingCycleNote: l10n("Billing cycles may differ per account"),
-    perAccountRows: sortCombinedAccountRows(perAccountRows, { by: "tokens", preferFresh: false }),
+    perAccountRows: sortCombinedAccountRows(perAccountRows, { by: "tokens" }),
     events,
     aggregations,
     membershipType: "combined",

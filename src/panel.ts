@@ -5,7 +5,7 @@ import { applyStatsRange, resolveStatsRange } from "./dayStats";
 import { groupModelAggs, modelModeL10nKey, modelVariantMode } from "./modelNormalize";
 import { CombinedViewDto, PanelContext, PanelData, StatsRange, UsageSnapshot, isCombinedView } from "./models";
 import { buildTrendPoints, computeTrendRange, dayKeyFromTs, sumUsageCostCents } from "./trendData";
-import { formatCents, formatEventTime, formatPct, formatRelativeUpdated, formatTokens, isZh, membershipLabel, shortenModel } from "./treeView";
+import { formatCents, formatEventTime, formatPct, formatRelativeUpdated, formatTokens, isZh, membershipLabel, shortenModel } from "./formatters";
 
 export class UsagePanel {
   public static current: UsagePanel | undefined;
@@ -466,26 +466,34 @@ function trendBoundsFor(snapshot: {
 
 function renderCombinedBody(data: CombinedViewDto, ctx: PanelContext): string {
   const rangeMode = ctx.statsRange.mode !== "cycle";
-  const sortBy = rangeMode ? "tokens" : "updated";
+  const sortBy = rangeMode ? "tokens" : "activity";
   const sortedRows = sortCombinedAccountRows(data.perAccountRows, {
     by: sortBy,
-    preferFresh: !rangeMode,
   });
   const visibleRows = rangeMode ? sortedRows.filter((r) => r.totalTokens > 0) : sortedRows;
   const hiddenZeros = rangeMode ? sortedRows.length - visibleRows.length : 0;
   const poolCol = rangeMode ? vscode.l10n.t("Pool % (cycle)") : vscode.l10n.t("Pool %");
   // Display invariant: header total must match sum of all rows (including hidden zeros).
   const displayTotal = sortedRows.reduce((s, r) => s + r.totalTokens, 0);
+  const activityHint = vscode.l10n.t("Based on usage events / day totals, not chat creation time");
   const rows = visibleRows
     .map((r) => {
-      const fullTime = new Date(r.updatedAt).toLocaleString();
-      return `<tr class="clickable drill-row" data-user-id="${escapeHtml(r.userId)}" title="${escapeHtml(vscode.l10n.t("Click to view account details"))}">
-      <td>${escapeHtml(r.label)}${r.isStale ? ` <span class="badge stale">${escapeHtml(vscode.l10n.t("cached"))}</span>` : ""}</td>
+      const activityTitle = r.lastActivityAt
+        ? `${new Date(r.lastActivityAt).toLocaleString()}\n${activityHint}`
+        : activityHint;
+      const badges = [
+        r.isCurrent ? `<span class="badge current">${escapeHtml(vscode.l10n.t("Current"))}</span>` : "",
+        !r.isCurrent && r.isStale ? `<span class="badge stale">${escapeHtml(vscode.l10n.t("cached"))}</span>` : "",
+      ]
+        .filter(Boolean)
+        .join("");
+      return `<tr class="clickable drill-row${r.isCurrent ? " row-current" : ""}" data-user-id="${escapeHtml(r.userId)}" title="${escapeHtml(vscode.l10n.t("Click to view account details"))}">
+      <td><span class="acct-cell">${badges}<span class="acct-label" title="${escapeHtml(r.label)}">${escapeHtml(r.label)}</span></span></td>
       <td>${escapeHtml(membershipLabel(r.membershipType))}</td>
       <td class="num">${escapeHtml(formatTokens(r.totalTokens))}</td>
       <td class="num">${r.overallUsedCents !== null && r.overallLimitCents !== null ? `${formatCents(r.overallUsedCents)}/${formatCents(r.overallLimitCents)}` : `${formatPct(r.cursorModelsPercent, false)} / ${formatPct(r.otherModelsPercent, false)}`}</td>
       <td class="num">${escapeHtml(formatHitRate(r.cacheHitRate))}<small>${escapeHtml(formatCacheReadWrite(r.cacheReadTokens, r.cacheWriteTokens))}</small></td>
-      <td title="${escapeHtml(fullTime)}">${escapeHtml(formatRelativeUpdated(r.updatedAt))}</td>
+      <td title="${escapeHtml(activityTitle)}">${r.lastActivityAt ? escapeHtml(formatRelativeUpdated(r.lastActivityAt)) : "—"}</td>
     </tr>`;
     })
     .join("");
@@ -550,7 +558,7 @@ function renderCombinedBody(data: CombinedViewDto, ctx: PanelContext): string {
     <section><h2>${escapeHtml(vscode.l10n.t("Per account ({0})", visibleRows.length))}</h2>
       ${usageHint}
       <div class="account-scroll">
-        <table class="account-table"><thead><tr><th>${escapeHtml(vscode.l10n.t("Account"))}</th><th>${escapeHtml(vscode.l10n.t("Plan"))}</th><th>${escapeHtml(vscode.l10n.t("Tokens"))}</th><th>${escapeHtml(poolCol)}</th><th>${escapeHtml(vscode.l10n.t("Cache Hit"))}</th><th>${escapeHtml(vscode.l10n.t("Updated"))}</th></tr></thead><tbody>${emptyRows}</tbody></table>
+        <table class="account-table"><thead><tr><th>${escapeHtml(vscode.l10n.t("Account"))}</th><th>${escapeHtml(vscode.l10n.t("Plan"))}</th><th>${escapeHtml(vscode.l10n.t("Tokens"))}</th><th>${escapeHtml(poolCol)}</th><th>${escapeHtml(vscode.l10n.t("Cache Hit"))}</th><th title="${escapeHtml(activityHint)}">${escapeHtml(vscode.l10n.t("Last used"))}</th></tr></thead><tbody>${emptyRows}</tbody></table>
       </div>
     </section>
     <section><h2>${escapeHtml(vscode.l10n.t("By Model ({0} groups)", groupModelAggs(data.aggregations, data.events).length))}</h2>
@@ -807,7 +815,15 @@ h2 { margin: 0 0 8px; font-size: 12px; color: var(--muted); font-weight: 600; le
 }
 .fold-btn:hover { background: var(--hover); color: var(--text); }
 .fold-spacer { display: inline-block; width: 22px; flex-shrink: 0; }
-.badge.stale { background: color-mix(in srgb, var(--muted) 20%, transparent); color: var(--muted); text-transform: lowercase; }
+.badge.stale { background: color-mix(in srgb, var(--muted) 22%, transparent); color: var(--muted); flex-shrink: 0; }
+.badge.current {
+  background: var(--accent, #3794ff); color: #fff; font-weight: 700;
+  flex-shrink: 0; letter-spacing: 0.02em; padding: 2px 8px; font-size: 12px;
+}
+tr.row-current td { background: color-mix(in srgb, var(--accent, #3794ff) 14%, transparent); }
+tr.row-current td:first-child { box-shadow: inset 4px 0 0 var(--accent, #3794ff); }
+.acct-cell { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.acct-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 .name { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .name small { display: block; font-size: 10px; color: var(--muted); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .num { text-align: right; font-variant-numeric: tabular-nums; }
@@ -864,10 +880,12 @@ table { width: 100%; border-collapse: collapse; }
   position: sticky; top: 0; background: var(--card); z-index: 1;
   box-shadow: 0 1px 0 var(--line);
 }
-.account-table td:first-child { max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-th, td { text-align: left; padding: 8px 4px; border-bottom: 1px solid var(--line); }
-th { color: var(--muted); font-weight: 500; }
-.badge { font-size: 11px; border-radius: 99px; padding: 1px 8px; }
+.account-table td:first-child { max-width: 280px; }
+.account-table tbody tr:hover td { background: var(--hover); }
+.account-table tbody tr.row-current:hover td { background: color-mix(in srgb, var(--accent, #3794ff) 20%, transparent); }
+th, td { text-align: left; padding: 10px 8px; border-bottom: 1px solid var(--line); font-size: 13px; }
+th { color: var(--muted); font-weight: 600; font-size: 12px; }
+.badge { font-size: 11px; border-radius: 99px; padding: 1px 8px; display: inline-block; }
 .badge.inc { background: color-mix(in srgb, var(--ok) 18%, transparent); color: var(--ok); }
 .badge.od { background: color-mix(in srgb, var(--warn) 18%, transparent); color: var(--warn); }
 .empty { color: var(--muted); }

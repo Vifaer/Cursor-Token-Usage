@@ -7,15 +7,12 @@ import {
   tooltipHeaderRow,
   tooltipSeparator,
 } from "./tooltipFormat";
-import { formatPct, formatTokens, membershipLabel } from "./treeView";
+import { formatCents, formatPct, formatTokens, membershipLabel } from "./formatters";
+
 const TOOLTIP_ACCOUNT_ROWS = 10;
 
 export type StatusBarFormat = "percent" | "amount" | "amount_with_reset" | "amount_with_plan";
 export type DisplayFormat = "remaining" | "fraction" | "compact";
-
-function formatCents(cents: number): string {
-  return `$${(cents / 100).toFixed(2)}`;
-}
 
 function usedPercent(snapshot: UsageSnapshot): number {
   if (snapshot.requestMax && snapshot.requestMax > 0 && snapshot.requestUsed !== null && snapshot.requestUsed !== undefined) {
@@ -101,7 +98,7 @@ export function buildOverviewTooltip(combined: CombinedViewDto, lastSuccess?: Da
     tooltipSeparator(),
     tooltipHeaderRow(),
   ];
-  for (const r of sortCombinedAccountRows(combined.perAccountRows, { by: "updated" }).slice(0, TOOLTIP_ACCOUNT_ROWS)) {
+  for (const r of sortCombinedAccountRows(combined.perAccountRows, { by: "activity" }).slice(0, TOOLTIP_ACCOUNT_ROWS)) {
     lines.push(formatAccountTooltipRow(r));
   }
   const extra = combined.perAccountRows.length - TOOLTIP_ACCOUNT_ROWS;

@@ -16,6 +16,10 @@ import {
   saveAccountSnapshot,
   saveViewScope,
 } from "./accountStore";
+import {
+  shouldRefreshSecondary,
+  staleThresholdFromPollingInterval,
+} from "./combinedView";
 import { mergeEvents } from "./mergeEvents";
 import { getSession, readFileIdentityHints } from "./credentials";
 import { CombinedViewDto, UsageAlert, UsageSnapshot, ViewScope } from "./models";
@@ -42,6 +46,9 @@ export class UsageTracker {
   private _viewScope: ViewScope = "all";
   private _viewAccountId: string | null = null;
   private _abortController: AbortController | null = null;
+  /** Authoritative current Cursor login userId (JWT); null when unknown. */
+  private _currentUserId: string | null = null;
+  private _forceSecondaryOnce = false;
 
   set onUpdate(callback: () => void) {
     this._onUpdate = callback;
@@ -83,20 +90,33 @@ export class UsageTracker {
     return this._viewAccountId;
   }
 
-  /** Cold-start: show cached account immediately and restore view scope. */
-  hydrateFromStore(): void {
+  get currentUserId(): string | null {
+    return this._currentUserId;
+  }
+
+  /**
+   * Cold-start: prefer snapshot for known session userId; never invent "current"
+   * from accounts[0] alone.
+   */
+  hydrateFromStore(currentUserId?: string | null): void {
+    if (currentUserId) this._currentUserId = currentUserId;
     const accounts = listAccountSnapshots();
-    if (accounts.length === 0) return;
-    this._lastSnapshot = accounts[0];
-    this._lastSuccessTime = accounts[0].timestamp;
+    if (accounts.length === 0) {
+      this._onUpdate?.();
+      return;
+    }
+    const preferred =
+      this._currentUserId && loadAccountSnapshot(this._currentUserId)
+        ? loadAccountSnapshot(this._currentUserId)!
+        : accounts[0];
+    this._lastSnapshot = preferred;
+    this._lastSuccessTime = preferred.timestamp;
     const saved = parseSavedViewScope();
-    if (accounts.length > 0) {
-      this._viewScope = saved.scope;
-      this._viewAccountId = saved.scope === "account" ? saved.accountId : null;
-      if (this._viewScope === "account" && this._viewAccountId && !loadAccountSnapshot(this._viewAccountId)) {
-        this._viewScope = "all";
-        this._viewAccountId = null;
-      }
+    this._viewScope = saved.scope;
+    this._viewAccountId = saved.scope === "account" ? saved.accountId : null;
+    if (this._viewScope === "account" && this._viewAccountId && !loadAccountSnapshot(this._viewAccountId)) {
+      this._viewScope = "all";
+      this._viewAccountId = null;
     }
     this._onUpdate?.();
   }
@@ -114,7 +134,7 @@ export class UsageTracker {
       data: this.getPanelData(),
       viewScope: this._viewScope,
       viewAccountId: this._viewAccountId,
-      currentUserId: this._lastSnapshot?.userId ?? null,
+      currentUserId: this._currentUserId,
       statsRange: { mode: "cycle" },
       accounts,
     };
@@ -127,28 +147,36 @@ export class UsageTracker {
     }
     if (this._viewScope === "all") {
       return dedupeByUserId(
-        [this._lastSnapshot, ...listOtherAccounts(this._lastSnapshot?.userId)].filter(Boolean) as UsageSnapshot[],
+        [this._lastSnapshot, ...listOtherAccounts(this._currentUserId ?? this._lastSnapshot?.userId)].filter(
+          Boolean,
+        ) as UsageSnapshot[],
       );
+    }
+    if (this._currentUserId) {
+      const cur = loadAccountSnapshot(this._currentUserId);
+      if (cur) return [cur];
     }
     return this._lastSnapshot ? [this._lastSnapshot] : [];
   }
 
   getCombinedView(): CombinedViewDto | null {
     const accounts = dedupeByUserId(
-      [this._lastSnapshot, ...listOtherAccounts(this._lastSnapshot?.userId)].filter(Boolean) as UsageSnapshot[],
+      [this._lastSnapshot, ...listOtherAccounts(this._currentUserId ?? this._lastSnapshot?.userId)].filter(
+        Boolean,
+      ) as UsageSnapshot[],
     );
-    return buildCombinedView(accounts, this._lastSnapshot?.userId);
+    return buildCombinedView(accounts, this._currentUserId ?? undefined);
   }
 
   getPanelData(): UsageSnapshot | CombinedViewDto | null {
     if (this._viewScope === "all") {
-      const accounts = dedupeByUserId(
-        [this._lastSnapshot, ...listOtherAccounts(this._lastSnapshot?.userId)].filter(Boolean) as UsageSnapshot[],
-      );
-      return buildCombinedView(accounts, this._lastSnapshot?.userId);
+      return this.getCombinedView();
     }
     if (this._viewScope === "account" && this._viewAccountId) {
       return loadAccountSnapshot(this._viewAccountId);
+    }
+    if (this._currentUserId) {
+      return loadAccountSnapshot(this._currentUserId) ?? this._lastSnapshot;
     }
     return this._lastSnapshot;
   }
@@ -163,8 +191,9 @@ export class UsageTracker {
     return new Promise((resolve) => this._idleWaiters.push(resolve));
   }
 
-  async poll(force = false, opts?: { fullEvents?: boolean }): Promise<boolean> {
+  async poll(force = false, opts?: { fullEvents?: boolean; forceSecondary?: boolean }): Promise<boolean> {
     const fullEvents = !!opts?.fullEvents;
+    if (opts?.forceSecondary) this._forceSecondaryOnce = true;
     if (fullEvents) this._queuedFull = true;
 
     if (this._running) {
@@ -244,6 +273,8 @@ export class UsageTracker {
       const prev = this._lastSnapshot;
       let snapshot = result.snapshot;
       const accountSwitched = !!prev && prev.userId !== snapshot.userId;
+
+      this._currentUserId = snapshot.userId;
 
       if (accountSwitched) {
         log.appendLine(`[${ts}] poll#${pollId} 账号切换 ${prev!.userId.slice(0, 10)} → ${snapshot.userId.slice(0, 10)}`);
@@ -366,13 +397,15 @@ export class UsageTracker {
     }
   }
 
-  /** Upsert current JWT; lite-poll other retained JWTs (never same accessToken). */
+  /** Upsert current JWT; refresh other JWTs only when stale (or forceSecondary). */
   private async refreshStoredSessions(
     current: UsageSnapshot,
     signal: AbortSignal,
     ts: string,
     pollId: number,
   ): Promise<void> {
+    const forceSecondary = this._forceSecondaryOnce;
+    this._forceSecondaryOnce = false;
     try {
       const session = await getSession();
       if (session && session.userId === current.userId) {
@@ -385,9 +418,25 @@ export class UsageTracker {
         limit: MAX_STORED_SESSION_POLLS,
       });
       if (others.length === 0 || signal.aborted) return;
-      log.appendLine(`[${ts}] poll#${pollId} refreshing ${others.length} stored session(s)`);
+
+      const cfgSeconds = vscode.workspace.getConfiguration("cursorTokenUsage").get<number>("pollingInterval", 30);
+      const staleMs = staleThresholdFromPollingInterval(cfgSeconds);
+      const nowMs = Date.now();
+      const due = forceSecondary
+        ? others
+        : others.filter((s) => {
+            const snap = loadAccountSnapshot(s.userId);
+            return shouldRefreshSecondary(snap?.timestamp.toISOString(), nowMs, staleMs);
+          });
+      if (due.length === 0) {
+        log.appendLine(`[${ts}] poll#${pollId} stored sessions: none due (staleMs=${staleMs})`);
+        return;
+      }
+      log.appendLine(
+        `[${ts}] poll#${pollId} refreshing ${due.length}/${others.length} stored session(s)${forceSecondary ? " (force)" : ""}`,
+      );
       await Promise.all(
-        others.map(async (s) => {
+        due.map(async (s) => {
           if (signal.aborted) return;
           const r = await fetchUsage({
             fullEvents: false,

@@ -1,16 +1,20 @@
 import * as vscode from "vscode";
 import { computeCacheStats } from "./cacheStats";
-import { mergeCombinedEvents, sortCombinedAccountRows, sumEventCostCents } from "./combinedView";
+import {
+  buildPerAccountRow,
+  mergeCombinedEvents,
+  sortCombinedAccountRows,
+  staleThresholdFromPollingInterval,
+  sumEventCostCents,
+} from "./combinedView";
 import { mergeEvents } from "./mergeEvents";
 import { compactEvents, MAX_EVENTS_PER_ACCOUNT, normalizeEventTimestamps, shouldCompact } from "./dailyBuckets";
 import {
-  CombinedAccountRow,
   CombinedViewDto,
   DailyBucket,
   ModelAgg,
   UsageEvent,
   UsageSnapshot,
-  accountLabelFor,
 } from "./models";
 
 export { compactEvents } from "./dailyBuckets";
@@ -90,12 +94,7 @@ export function parseSavedViewScope(): { scope: import("./models").ViewScope; ac
 
 function staleThresholdMs(): number {
   const seconds = vscode.workspace.getConfiguration("cursorTokenUsage").get<number>("pollingInterval", 30);
-  return Math.max(5, seconds) * 3 * 1000;
-}
-
-function isAccountStale(updatedAt: string, currentUserId?: string, accountUserId?: string): boolean {
-  if (accountUserId && currentUserId && accountUserId === currentUserId) return false;
-  return Date.now() - Date.parse(updatedAt) > staleThresholdMs();
+  return staleThresholdFromPollingInterval(seconds);
 }
 
 function readAll(): Record<string, PersistedSnapshot> {
@@ -318,26 +317,19 @@ function mergeAggs(rows: ModelAgg[]): ModelAgg[] {
 
 export function buildCombinedView(accounts: UsageSnapshot[], currentUserId?: string): CombinedViewDto | null {
   if (accounts.length === 0) return null;
-  const perAccountRows: CombinedAccountRow[] = accounts.map((a) => {
+  const staleMs = staleThresholdMs();
+  const perAccountRows = accounts.map((a) => {
     const acctStats = computeCacheStats(a.aggregations, a.events);
-    const updatedAt = a.timestamp.toISOString();
-    return {
-      userId: a.userId,
-      label: accountLabelFor(a.userId, a.accountLabel),
-      membershipType: a.membershipType,
-      totalTokens: a.totalTokens,
-      cursorModelsPercent: a.cursorModelsPercent,
-      otherModelsPercent: a.otherModelsPercent,
-      overallUsedCents: a.overallUsedCents,
-      overallLimitCents: a.overallLimitCents,
-      requestUsed: a.requestUsed ?? null,
-      requestMax: a.requestMax ?? null,
-      cacheHitRate: acctStats.hitRate,
-      cacheReadTokens: acctStats.cacheReadTokens,
-      cacheWriteTokens: acctStats.cacheWriteTokens,
-      isStale: isAccountStale(updatedAt, currentUserId, a.userId),
-      updatedAt,
-    };
+    return buildPerAccountRow(
+      a,
+      {
+        totalTokens: a.totalTokens,
+        cacheHitRate: acctStats.hitRate,
+        cacheReadTokens: acctStats.cacheReadTokens,
+        cacheWriteTokens: acctStats.cacheWriteTokens,
+      },
+      { currentUserId, staleMs },
+    );
   });
 
   let totalTokens = 0;
@@ -368,7 +360,7 @@ export function buildCombinedView(accounts: UsageSnapshot[], currentUserId?: str
     overallLimitCents,
     onDemandUsedCents,
     billingCycleNote: vscode.l10n.t("Billing cycles may differ per account"),
-    perAccountRows: sortCombinedAccountRows(perAccountRows, { by: "updated" }),
+    perAccountRows: sortCombinedAccountRows(perAccountRows, { by: "activity" }),
     events,
     aggregations,
     membershipType: "combined",
