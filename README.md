@@ -40,6 +40,7 @@ Cursor 已改为按 token、双池计费（不再是旧的「fast-premium 请求
 - **v1.3.4：** 状态栏默认当前账号；合并 Auto/Default 重复「标准」；趋势接入 dailyBuckets 且默认近 7 日；meter/hero 去重与文案修正
 - **v1.3.5：** 状态栏一键切换 **当前账号** / **总览**；悬停 tooltip 可点切换；详情面板工具栏 + ⋯ 菜单；命令面板：切换状态栏当前/总览
 - **v1.3.9：** 身份以 JWT `sub` + `cachedEmail` 为准（修复 Sentry 误标）；曾登录账号的 session 可并行刷新总览
+- **v1.3.16：** 总览标出「当前」账号并置顶；时间列改为「最近使用」；次账号陈旧度门控；当前徽章不被邮箱裁切；相对时间中文化
 
 ## 快速开始
 
@@ -53,7 +54,7 @@ cursor --install-extension vifaer.cursor-token-usage
 
 ### 从 VSIX 安装
 
-1. 从 [Releases](https://github.com/Vifaer/Cursor-Token-Usage/releases) 下载 `cursor-token-usage-1.3.9.vsix`
+1. 从 [Releases](https://github.com/Vifaer/Cursor-Token-Usage/releases) 下载最新 `cursor-token-usage-*.vsix`（当前 1.3.16+）
 2. 拖进 Cursor，或 `Cmd+Shift+P`（Windows：`Ctrl+Shift+P`）→ `Extensions: Install from VSIX...`
 3. 执行 `Developer: Reload Window`
 
@@ -272,6 +273,7 @@ Cursor now bills by tokens in two pools (not the old “fast-premium requests + 
 - **v1.3.4:** Status bar default = current account; merge Auto/Default duplicate modes; trend uses dailyBuckets + ≥7-day window; meter/hero cleanup
 - **v1.3.5:** Quick toggle status bar between **current account** and **overview**; tooltip switch link; details panel toolbar + ⋯ menu; Command Palette toggle
 - **v1.3.9:** Identity from JWT `sub` + `cachedEmail` (fixes Sentry mislabel); retained sessions refresh in overview in parallel
+- **v1.3.16:** Overview marks **current** (pinned, badge not clipped); **Last used** column; secondary stale-gate refresh; Chinese relative times
 
 ### Quick Start
 
@@ -285,7 +287,7 @@ cursor --install-extension vifaer.cursor-token-usage
 
 #### From a VSIX
 
-1. Download `cursor-token-usage-1.3.9.vsix` from [Releases](https://github.com/Vifaer/Cursor-Token-Usage/releases)
+1. Download the latest `cursor-token-usage-*.vsix` from [Releases](https://github.com/Vifaer/Cursor-Token-Usage/releases) (1.3.16+)
 2. Drag it into Cursor, or `Cmd+Shift+P` (Windows: `Ctrl+Shift+P`) → `Extensions: Install from VSIX...`
 3. Run `Developer: Reload Window`
 

@@ -1,7 +1,7 @@
 import * as vscode from "vscode";
 import { formatHitRate } from "./cacheStats";
 import { CombinedAccountRow } from "./models";
-import { formatPct, formatTokens } from "./treeView";
+import { formatPct, formatRelativeUpdated, formatTokens } from "./formatters";
 
 const SEP = " │ ";
 
@@ -18,13 +18,22 @@ function poolUsage(r: CombinedAccountRow): string {
 }
 
 export function formatAccountTooltipRow(r: CombinedAccountRow): string {
-  const stale = r.isStale ? ` ${vscode.l10n.t("(cached)")}` : "";
-  return [
-    shortenTooltipLabel(r.label),
-    formatTokens(r.totalTokens),
-    poolUsage(r),
-    formatHitRate(r.cacheHitRate),
-  ].join(SEP) + stale;
+  const badges: string[] = [];
+  if (r.isCurrent) badges.push(vscode.l10n.t("Current"));
+  if (r.isStale) badges.push(vscode.l10n.t("cached"));
+  const badge = badges.length ? ` (${badges.join(", ")})` : "";
+  const lastUsed = r.lastActivityAt
+    ? `${vscode.l10n.t("Last used")}: ${formatRelativeUpdated(r.lastActivityAt)}`
+    : `${vscode.l10n.t("Last used")}: —`;
+  return (
+    [
+      shortenTooltipLabel(r.label),
+      formatTokens(r.totalTokens),
+      poolUsage(r),
+      formatHitRate(r.cacheHitRate),
+      lastUsed,
+    ].join(SEP) + badge
+  );
 }
 
 export function tooltipSeparator(width = 28): string {

@@ -15,7 +15,7 @@ import { UsagePanel } from "./panel";
 import { resolveStatsRange } from "./dayStats";
 import { applyStatusBarColors, buildOverviewTooltip, buildTooltipLines, formatOverviewStatusBar, formatStatusBar } from "./render";
 import { UsageTracker } from "./tracker";
-import { formatTokens } from "./treeView";
+import { formatTokens } from "./formatters";
 
 let pollTimer: NodeJS.Timeout | undefined;
 let tracker: UsageTracker;
@@ -57,10 +57,10 @@ export function activate(context: vscode.ExtensionContext): void {
           staleEmails: hints.email ? [hints.email] : [],
         });
       }
+      tracker.hydrateFromStore(session?.userId ?? null);
     } catch {
-      /* ignore */
+      tracker.hydrateFromStore(null);
     }
-    tracker.hydrateFromStore();
     updateStatusBar();
     UsagePanel.current?.refresh();
   })();
@@ -123,7 +123,7 @@ async function refresh(): Promise<void> {
   suppressStale = true;
   if (mainStatusBar) mainStatusBar.text = `$(graph) Token …`;
   try {
-    await tracker.poll(true, { fullEvents: !!UsagePanel.current });
+    await tracker.poll(true, { fullEvents: !!UsagePanel.current, forceSecondary: true });
     UsagePanel.current?.refresh();
   } finally {
     suppressStale = false;
@@ -381,7 +381,7 @@ async function diagnoseAuth(): Promise<void> {
 async function importLegacyAccounts(): Promise<void> {
   await resetLegacyImportFlag(extensionContext.globalState);
   const result = await importLegacyAccountStores(extensionContext.globalState, { force: true });
-  tracker.hydrateFromStore();
+  tracker.hydrateFromStore(tracker.currentUserId);
   updateStatusBar();
   UsagePanel.current?.refresh();
   const src = result.sources.length ? result.sources.join(", ") : vscode.l10n.t("(none found)");
@@ -406,7 +406,8 @@ async function toggleStatusBarDataSource(): Promise<void> {
 }
 
 async function switchAccountView(): Promise<void> {
-  const current = tracker.lastSnapshot;
+  const currentId = tracker.currentUserId;
+  const currentSnap = currentId ? listAccountSnapshots().find((a) => a.userId === currentId) : null;
   const accounts = listAccountSnapshots();
   const picks = [
     {
@@ -416,11 +417,11 @@ async function switchAccountView(): Promise<void> {
     },
     {
       label: vscode.l10n.t("Current account"),
-      description: current?.accountLabel ?? current?.userId?.slice(0, 8) ?? "",
+      description: currentSnap?.accountLabel ?? currentId?.slice(0, 8) ?? vscode.l10n.t("(unknown)"),
       id: "current",
     },
     ...accounts
-      .filter((a) => a.userId !== current?.userId)
+      .filter((a) => a.userId !== currentId)
       .map((a) => ({
         label: a.accountLabel ?? `${a.userId.slice(0, 8)}…`,
         description: a.membershipType,
@@ -472,7 +473,8 @@ function buildCsv(data: UsageSnapshot | CombinedViewDto, statsRange?: import("./
       ? "# statsRange=cycle\n"
       : `# statsRange=${resolved.from}..${resolved.to}\n`;
   if (isCombinedView(data)) {
-    const header = "label,userId,membership,totalTokens,cacheHitRate,cacheRead,cacheWrite,input,output,overallUsedCents,overallLimitCents,updatedAt\n";
+    const header =
+      "label,userId,membership,totalTokens,cacheHitRate,cacheRead,cacheWrite,input,output,overallUsedCents,overallLimitCents,updatedAt,lastActivityAt,isCurrent\n";
     const rows = data.perAccountRows
       .map((r) =>
         [
@@ -488,6 +490,8 @@ function buildCsv(data: UsageSnapshot | CombinedViewDto, statsRange?: import("./
           r.overallUsedCents ?? "",
           r.overallLimitCents ?? "",
           r.updatedAt,
+          r.lastActivityAt ?? "",
+          r.isCurrent ? "1" : "0",
         ].join(","),
       )
       .join("\n");
